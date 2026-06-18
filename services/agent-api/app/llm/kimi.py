@@ -68,6 +68,8 @@ class KimiAdapter:
             output_tokens=usage["output_tokens"],
             total_tokens=usage["total_tokens"],
             estimated_cost_usd=cost.estimated_cost_usd,
+            prompt_cost_usd=cost.prompt_cost_usd,
+            completion_cost_usd=cost.completion_cost_usd,
             cost_source=cost.source,
         )
 

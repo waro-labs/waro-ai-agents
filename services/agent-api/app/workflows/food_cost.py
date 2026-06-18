@@ -443,11 +443,13 @@ class FoodCostWorkflow:
             return fallback_summary
 
         with self.tracer.start_as_current_span("llm.food_cost.summary") as span:
+            span.set_attribute("openinference.span.kind", "LLM")
             span.set_attribute("llm.provider", self.llm_adapter.provider)
             span.set_attribute("waro.run_id", str(run_id))
             span.set_attribute("waro.tenant_id", context.tenant_id)
             if self.settings.llm_provider == "kimi":
                 span.set_attribute("llm.model", self.settings.kimi_model)
+                span.set_attribute("llm.model_name", self.settings.kimi_model)
 
             try:
                 response = await self.llm_adapter.complete(
@@ -475,15 +477,27 @@ class FoodCostWorkflow:
 
             summary = response.content.strip() or fallback_summary
             span.set_attribute("llm.model", response.model)
+            span.set_attribute("llm.model_name", response.model)
             span.set_attribute("llm.response.provider", response.provider)
+            span.set_attribute("llm.input_messages.0.message.role", "system")
+            span.set_attribute("llm.input_messages.1.message.role", "user")
+            span.set_attribute("llm.output_messages.0.message.role", "assistant")
             if response.input_tokens is not None:
                 span.set_attribute("llm.usage.prompt_tokens", response.input_tokens)
+                span.set_attribute("llm.token_count.prompt", response.input_tokens)
             if response.output_tokens is not None:
                 span.set_attribute("llm.usage.completion_tokens", response.output_tokens)
+                span.set_attribute("llm.token_count.completion", response.output_tokens)
             if response.total_tokens is not None:
                 span.set_attribute("llm.usage.total_tokens", response.total_tokens)
+                span.set_attribute("llm.token_count.total", response.total_tokens)
+            if response.prompt_cost_usd is not None:
+                span.set_attribute("llm.cost.prompt", response.prompt_cost_usd)
+            if response.completion_cost_usd is not None:
+                span.set_attribute("llm.cost.completion", response.completion_cost_usd)
             if response.estimated_cost_usd is not None:
                 span.set_attribute("llm.cost.estimated_usd", response.estimated_cost_usd)
+                span.set_attribute("llm.cost.total", response.estimated_cost_usd)
             span.set_attribute("llm.cost.source", response.cost_source)
             span.set_status(Status(StatusCode.OK))
             await self._record_step(

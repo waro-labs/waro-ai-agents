@@ -12,6 +12,8 @@ class ModelPricing:
 class CostEstimate:
     estimated_cost_usd: float | None
     source: str
+    prompt_cost_usd: float | None = None
+    completion_cost_usd: float | None = None
 
 
 KIMI_PRICING: dict[str, ModelPricing] = {
@@ -56,11 +58,12 @@ def estimate_llm_cost(
     if pricing is None:
         return CostEstimate(estimated_cost_usd=None, source="pricing_unavailable")
 
-    cost = (
-        (input_tokens / 1_000_000) * pricing.input_usd_per_1m
-        + (output_tokens / 1_000_000) * pricing.output_usd_per_1m
-    )
+    prompt_cost = (input_tokens / 1_000_000) * pricing.input_usd_per_1m
+    completion_cost = (output_tokens / 1_000_000) * pricing.output_usd_per_1m
+    cost = prompt_cost + completion_cost
     return CostEstimate(
         estimated_cost_usd=round(cost, 8),
         source=pricing.source,
+        prompt_cost_usd=round(prompt_cost, 8),
+        completion_cost_usd=round(completion_cost, 8),
     )

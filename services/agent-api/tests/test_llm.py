@@ -102,6 +102,8 @@ async def test_kimi_adapter_estimates_known_model_cost():
     assert response.output_tokens == 500
     assert response.total_tokens == 1500
     assert response.estimated_cost_usd == 0.00295
+    assert response.prompt_cost_usd == 0.00095
+    assert response.completion_cost_usd == 0.002
     assert response.cost_source == "static:official-kimi-pricing-2026-06-18"
 
 
@@ -128,6 +130,8 @@ async def test_kimi_adapter_estimates_cheapest_moonshot_model_cost():
     response = await adapter.complete(messages=[LLMMessage(role="user", content="hola")])
 
     assert response.estimated_cost_usd == 0.0012
+    assert response.prompt_cost_usd == 0.0002
+    assert response.completion_cost_usd == 0.001
     assert response.cost_source == "static:official-kimi-pricing-2026-06-18"
 
 
