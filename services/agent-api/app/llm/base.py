@@ -17,6 +17,8 @@ class LLMResponse:
     output_tokens: int | None = None
     total_tokens: int | None = None
     estimated_cost_usd: float | None = None
+    prompt_cost_usd: float | None = None
+    completion_cost_usd: float | None = None
     cost_source: str = "unavailable"
 
 
