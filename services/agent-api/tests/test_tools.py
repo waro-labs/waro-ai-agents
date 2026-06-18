@@ -1,0 +1,279 @@
+import hashlib
+import hmac
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
+from app.config import Settings
+from app.dependencies import internal_auth
+from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
+from app.tools.allowlist import coerce_args, get_tool_spec, resolve_fields
+from app.tools.gateway import ToolGateway
+from app.tools.models import ToolCallRequest
+from app.tools.runner import ToolRunError, ToolRunResult, WaroCliRunner
+
+
+class FakeConnection:
+    def __init__(self, tool_call_id: UUID | None = None):
+        self.tool_call_id = tool_call_id or uuid4()
+        self.fetches = []
+        self.executes = []
+
+    async def fetchrow(self, query, *args):
+        self.fetches.append((query, args))
+        return {"id": self.tool_call_id}
+
+    async def execute(self, query, *args):
+        self.executes.append((query, args))
+
+
+class FakeRunner:
+    def __init__(self, result=None, error: ToolRunError | None = None):
+        self.result = result or {"data": [{"id": "p1", "name": "Arepa"}]}
+        self.error = error
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return ToolRunResult(result=self.result, stderr="", argv=("waro",))
+
+
+def test_unknown_tool_is_not_allowlisted():
+    assert get_tool_spec("shell.rm") is None
+
+
+def test_fields_are_required_or_defaulted_and_limited():
+    spec = get_tool_spec("waro.menu.products")
+
+    assert resolve_fields(spec, None) == ("id", "name", "price", "is_available")
+
+    with pytest.raises(ValueError):
+        resolve_fields(spec, ["id", "customer_email"])
+
+
+def test_args_reject_extra_flags_and_build_typed_cli_args():
+    spec = get_tool_spec("waro.menu.products")
+
+    with pytest.raises(Exception):
+        coerce_args(spec, {"limit": 20, "free-form": "--help"})
+
+    args = coerce_args(
+        spec,
+        {"limit": 20, "is-available": True, "include-ingredients": False},
+    )
+
+    assert args.cli_args() == [
+        "--limit",
+        "20",
+        "--offset",
+        "0",
+        "--is-available",
+        "true",
+        "--include-recipe-bases",
+        "true",
+        "--include-modifiers",
+        "true",
+    ]
+
+
+def test_runner_builds_argv_without_shell_strings():
+    settings = Settings(WARO_CLI_BINARY="waro")
+    spec = get_tool_spec("waro.analytics.food_cost")
+    args = coerce_args(spec, {"date-from": "2026-06-01"})
+    runner = WaroCliRunner(settings)
+
+    argv = runner.build_argv(
+        spec=spec,
+        args=args,
+        fields=("product_id", "product_name"),
+        dry_run=True,
+    )
+
+    assert argv[:7] == (
+        "waro",
+        "--output",
+        "json",
+        "--no-color",
+        "--fields",
+        "product_id,product_name",
+        "analytics",
+    )
+    assert argv[7:] == ("food-cost", "--date-from", "2026-06-01", "--dry-run")
+
+
+@pytest.mark.asyncio
+async def test_internal_request_verifies_hmac_signature(monkeypatch):
+    secret = "test-secret"
+    body = b'{"tool_name":"waro.menu.products"}'
+    request_id = "req-123"
+    tenant_id = str(uuid4())
+    profile_id = str(uuid4())
+    scopes = "menu:read,orders:read"
+    digest = hashlib.sha256(body).hexdigest()
+    canonical = "\n".join(
+        [
+            "POST",
+            "/internal/tools/call",
+            request_id,
+            tenant_id,
+            profile_id,
+            "",
+            scopes,
+            digest,
+        ]
+    )
+    signature = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/internal/tools/call",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+        },
+        receive,
+    )
+    monkeypatch.setattr(
+        internal_auth,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_signature_verification_enabled=True,
+            internal_signature_secret=secret,
+        ),
+    )
+
+    context = await require_internal_request(
+        request,
+        x_waro_tenant_id=tenant_id,
+        x_waro_profile_id=profile_id,
+        x_waro_scopes=scopes,
+        x_waro_request_id=request_id,
+        x_waro_internal_signature=signature,
+    )
+
+    assert context.tenant_id == tenant_id
+    assert context.scopes == ("menu:read", "orders:read")
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_missing_scope_before_persistence():
+    connection = FakeConnection()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    gateway = ToolGateway(
+        settings=Settings(),
+        runner=FakeRunner(),
+        connection_factory=connection_factory,
+    )
+    request = ToolCallRequest(
+        run_id=uuid4(),
+        tool_name="waro.financial.products",
+        arguments={},
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-1",
+        member_id=None,
+        scopes=("menu:read",),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await gateway.call(request=request, context=context)
+
+    assert exc.value.status_code == 403
+    assert connection.fetches == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_persists_sanitized_success():
+    connection = FakeConnection()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    gateway = ToolGateway(
+        settings=Settings(TOOL_RESULT_MAX_BYTES=10_000),
+        runner=FakeRunner(),
+        connection_factory=connection_factory,
+    )
+    request = ToolCallRequest(
+        run_id=uuid4(),
+        tool_name="waro.menu.products",
+        arguments={"limit": 5},
+        fields=["id", "name"],
+        idempotency_key="idem-1",
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-1",
+        member_id=None,
+        scopes=("menu:read",),
+    )
+
+    response = await gateway.call(request=request, context=context)
+
+    assert response.status == "succeeded"
+    assert response.tool_call_id == connection.tool_call_id
+    assert len(connection.fetches) == 1
+    assert len(connection.executes) == 3
+    insert_args = connection.fetches[0][1]
+    assert "WARO_API_KEY" not in str(insert_args)
+    assert '"fields": ["id", "name"]' in insert_args[4]
+
+
+@pytest.mark.asyncio
+async def test_gateway_persists_sanitized_error():
+    connection = FakeConnection()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    gateway = ToolGateway(
+        settings=Settings(WARO_API_KEY="super-secret-key"),
+        runner=FakeRunner(
+            error=ToolRunError(
+                message="Tool execution failed.",
+                returncode=1,
+                stderr="bad key super-secret-key",
+                argv=("waro", "menu", "products"),
+            )
+        ),
+        connection_factory=connection_factory,
+    )
+    request = ToolCallRequest(
+        run_id=uuid4(),
+        tool_name="waro.menu.products",
+        arguments={"limit": 5},
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-1",
+        member_id=None,
+        scopes=("menu:read",),
+    )
+
+    response = await gateway.call(request=request, context=context)
+
+    assert response.status == "failed"
+    assert "super-secret-key" not in str(response.error)
+    assert len(connection.executes) == 3

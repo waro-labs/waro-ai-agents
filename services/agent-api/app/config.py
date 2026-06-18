@@ -26,6 +26,11 @@ class Settings(BaseSettings):
         default=None,
         alias="INTERNAL_SIGNATURE_SECRET",
     )
+    waro_cli_binary: str = Field(default="waro", alias="WARO_CLI_BINARY")
+    waro_api_url: str | None = Field(default=None, alias="WARO_API_URL")
+    waro_api_key: str | None = Field(default=None, alias="WARO_API_KEY")
+    tool_timeout_seconds: int = Field(default=30, alias="TOOL_TIMEOUT_SECONDS")
+    tool_result_max_bytes: int = Field(default=200_000, alias="TOOL_RESULT_MAX_BYTES")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
