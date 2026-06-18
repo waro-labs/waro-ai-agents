@@ -1,6 +1,7 @@
 asyncpg==0.30.0
 fastapi==0.115.6
 httpx==0.28.1
+langgraph>=0.2.60,<0.3.0
 opentelemetry-api==1.42.1
 opentelemetry-exporter-otlp-proto-grpc==1.42.1
 opentelemetry-sdk==1.42.1

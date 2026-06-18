@@ -8,6 +8,8 @@ from app.database import DatabasePool
 from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
 from app.telemetry import configure_tracing, instrument_app
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
+from app.workflows.food_cost import FoodCostWorkflow
+from app.workflows.models import FoodCostQuestionRequest, FoodCostWorkflowResponse
 
 
 @asynccontextmanager
@@ -31,6 +33,10 @@ instrument_app(app, get_settings())
 
 def get_tool_gateway() -> ToolGateway:
     return ToolGateway(settings=get_settings())
+
+
+def get_food_cost_workflow() -> FoodCostWorkflow:
+    return FoodCostWorkflow(settings=get_settings())
 
 
 @app.get("/health", tags=["health"])
@@ -68,3 +74,16 @@ async def call_tool(
     gateway: ToolGateway = Depends(get_tool_gateway),
 ) -> ToolCallResponse:
     return await gateway.call(request=request, context=context)
+
+
+@app.post(
+    "/internal/ai/food-cost/messages",
+    response_model=FoodCostWorkflowResponse,
+    tags=["ai"],
+)
+async def ask_food_cost(
+    request: FoodCostQuestionRequest,
+    context: InternalRequestContext = Depends(require_internal_request),
+    workflow: FoodCostWorkflow = Depends(get_food_cost_workflow),
+) -> FoodCostWorkflowResponse:
+    return await workflow.run(request=request, context=context)
