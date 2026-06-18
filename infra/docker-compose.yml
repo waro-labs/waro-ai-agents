@@ -3,7 +3,7 @@ services:
     build:
       context: ../services/agent-api
     env_file:
-      - ../.env
+      - ../.env.example
     ports:
       - "127.0.0.1:8100:8100"
     networks:
