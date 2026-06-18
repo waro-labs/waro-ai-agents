@@ -19,16 +19,38 @@ cd services/agent-api
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+./scripts/install-local-waro-cli.sh --from-source ../../../waro-cli
+export WARO_CLI_BINARY=$PWD/.local/bin/waro
 uvicorn app.main:app --host 127.0.0.1 --port 8100
 curl http://127.0.0.1:8100/health
+```
+
+`WARO_API_URL` and `WARO_API_KEY` are passed through to the CLI subprocess when
+the tool gateway executes a WARO tool. Keep API keys in your local `.env`; do
+not commit them.
+
+The local CLI binary lives at `services/agent-api/.local/bin/waro`. That path is
+ignored by git so local builds and copied binaries do not enter the repository.
+You can also copy an already installed binary into the service-owned path:
+
+```bash
+./scripts/install-local-waro-cli.sh --from-path "$(command -v waro)"
 ```
 
 Docker compose from the repository root:
 
 ```bash
+cd services/agent-api
+./scripts/install-local-waro-cli.sh --from-source ../../../waro-cli
+cd ../..
 docker compose -f infra/docker-compose.yml up --build agent-api
 curl http://127.0.0.1:8100/health
 ```
+
+The Docker image copies `services/agent-api/.local/bin/waro` into
+`/usr/local/bin/waro` and sets `WARO_CLI_BINARY=/usr/local/bin/waro`. Provision
+the local binary before building the image. Runtime API credentials should be
+provided through environment variables, not baked into the image.
 
 Run with local Phoenix trace inspection:
 

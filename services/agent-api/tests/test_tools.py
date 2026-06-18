@@ -84,7 +84,7 @@ def test_args_reject_extra_flags_and_build_typed_cli_args():
 
 
 def test_runner_builds_argv_without_shell_strings():
-    settings = Settings(WARO_CLI_BINARY="waro")
+    settings = Settings(WARO_CLI_BINARY="/tmp/agent-api/.local/bin/waro")
     spec = get_tool_spec("waro.analytics.food_cost")
     args = coerce_args(spec, {"date-from": "2026-06-01"})
     runner = WaroCliRunner(settings)
@@ -97,7 +97,7 @@ def test_runner_builds_argv_without_shell_strings():
     )
 
     assert argv[:7] == (
-        "waro",
+        "/tmp/agent-api/.local/bin/waro",
         "--output",
         "json",
         "--no-color",
