@@ -8,7 +8,7 @@ can evolve with their own runtime, tracing, memory, approval, and tool-safety
 contracts.
 
 - Repository: <https://github.com/waro-labs/waro-ai-agents>
-- Architecture diagram: <https://www.figma.com/board/iDPBndrqLp0UUieI2ifqQs?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=d7474638-b2df-4cfe-8d8c-b6b0403857e3&architecture=true>
+- Editable architecture diagram: <https://www.figma.com/board/iDPBndrqLp0UUieI2ifqQs?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=d7474638-b2df-4cfe-8d8c-b6b0403857e3&architecture=true>
 - Status: early internal skeleton
 - License: source-available proprietary, not open source
 
@@ -29,6 +29,8 @@ Keeping the agent runtime separate reduces blast radius while preserving the
 existing WARO FastAPI backend as the public/auth boundary.
 
 ## Current architecture
+
+![WARO AI Agents architecture](docs/assets/waro-ai-agents-architecture.png)
 
 ```text
 Nuxt UI
