@@ -8,7 +8,6 @@ can evolve with their own runtime, tracing, memory, approval, and tool-safety
 contracts.
 
 - Repository: <https://github.com/waro-labs/waro-ai-agents>
-- Editable architecture diagram: <https://www.figma.com/board/iDPBndrqLp0UUieI2ifqQs?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=d7474638-b2df-4cfe-8d8c-b6b0403857e3&architecture=true>
 - Status: early internal skeleton
 - License: source-available proprietary, not open source
 
