@@ -30,6 +30,21 @@ docker compose -f infra/docker-compose.yml up --build agent-api
 curl http://127.0.0.1:8100/health
 ```
 
+Run with local Phoenix trace inspection:
+
+```bash
+docker compose -f infra/docker-compose.yml up --build agent-api phoenix
+```
+
+Open <http://127.0.0.1:6006>, send a signed internal tool request, then verify
+the matching Postgres run row:
+
+```sql
+SELECT id, trace_id
+FROM ai.runs
+WHERE id = '<run-id>';
+```
+
 ## Internal boundary
 
 `GET /health` is the only unauthenticated runtime endpoint in this skeleton.
@@ -45,6 +60,6 @@ Expected signed context headers from the public WARO FastAPI boundary:
 - `x-waro-request-id`
 - `x-waro-internal-signature`
 
-Signature verification is intentionally not enabled until
-`INTERNAL_SIGNATURE_SECRET` is configured and the verifier is completed in a
-follow-up batch.
+Signature verification fails closed until `INTERNAL_SIGNATURE_SECRET` is
+configured, then validates the request body digest and signed WARO context
+headers.

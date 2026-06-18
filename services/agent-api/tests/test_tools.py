@@ -12,6 +12,7 @@ from app.config import Settings
 from app.dependencies import internal_auth
 from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
 from app.tools.allowlist import coerce_args, get_tool_spec, resolve_fields
+from app.tools.audit import ToolCallAudit
 from app.tools.gateway import ToolGateway
 from app.tools.models import ToolCallRequest
 from app.tools.runner import ToolRunError, ToolRunResult, WaroCliRunner
@@ -277,3 +278,38 @@ async def test_gateway_persists_sanitized_error():
     assert response.status == "failed"
     assert "super-secret-key" not in str(response.error)
     assert len(connection.executes) == 3
+
+
+@pytest.mark.asyncio
+async def test_audit_persists_trace_and_span_references():
+    connection = FakeConnection()
+    audit = ToolCallAudit(connection)
+    run_id = uuid4()
+    step_id = uuid4()
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-1",
+        member_id=None,
+        scopes=("menu:read",),
+    )
+
+    tool_call_id = await audit.start(
+        context=context,
+        run_id=run_id,
+        step_id=step_id,
+        tool_name="waro.menu.products",
+        arguments={"arguments": {}, "fields": ["id"]},
+        dry_run=False,
+        idempotency_key=None,
+        trace_id="0" * 32,
+        span_id="1" * 16,
+    )
+
+    assert tool_call_id == connection.tool_call_id
+    assert len(connection.fetches) == 1
+    assert len(connection.executes) == 3
+    assert "UPDATE ai.runs" in connection.executes[0][0]
+    assert connection.executes[0][1] == ("0" * 32, run_id)
+    assert "UPDATE ai.steps" in connection.executes[1][0]
+    assert connection.executes[1][1] == ("1" * 16, step_id)

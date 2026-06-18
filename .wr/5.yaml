@@ -1,0 +1,67 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 5
+title: "Add OpenTelemetry/OpenLLMetry tracing and Phoenix wiring"
+repo: waro-ai-agents
+repo_remote: waro-labs/waro-ai-agents
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/waro-ai-agents
+stack: fastapi
+branch: wr-5-opentelemetry-phoenix
+
+paths:
+  - services/agent-api/requirements.txt
+  - services/agent-api/app/config.py
+  - services/agent-api/app/main.py
+  - services/agent-api/app/database.py
+  - services/agent-api/app/tools/gateway.py
+  - services/agent-api/app/tools/audit.py
+  - services/agent-api/tests/test_tools.py
+  - migrations/001_ai_rag_audit_schemas.sql
+  - infra/docker-compose.yml
+  - .env.example
+  - README.md
+  - services/agent-api/README.md
+
+ac:
+  - Local trace appears in Phoenix through OTLP using PHOENIX_COLLECTOR_ENDPOINT.
+  - FastAPI request spans are emitted for internal agent-api requests.
+  - Tool success/error spans include sanitized low-cardinality metadata.
+  - ai.runs.trace_id and ai.steps.span_id are persisted or updated for the run/step path used by validation.
+  - Postgres run row contains trace_id matching the Phoenix trace used in validation.
+  - PR lists the manual validation command and Phoenix/Postgres checks.
+
+out_of_scope:
+  - Production observability retention policy.
+  - LangSmith integration.
+  - LangGraph food-cost workflow and business eval scoring.
+  - Broad schema redesign beyond minimal trace/span persistence.
+
+hints:
+  entry: "services/agent-api/app/main.py:19 FastAPI app and lifespan"
+  settings: "services/agent-api/app/config.py:14 PHOENIX_COLLECTOR_ENDPOINT, OTEL_SERVICE_NAME"
+  tool_boundary: "services/agent-api/app/tools/gateway.py:28 ToolGateway.call"
+  audit_pattern: "services/agent-api/app/tools/audit.py:48 start, :92 success, :123 error"
+  schema: "migrations/001_ai_rag_audit_schemas.sql:43 ai.runs.trace_id, :70 ai.steps.span_id"
+  compose: "infra/docker-compose.yml:20 Phoenix with OTLP gRPC port 4317"
+  tests: "cd services/agent-api && pytest"
+
+validation:
+  - cd services/agent-api && python -m compileall app
+  - cd services/agent-api && pytest
+  - docker compose -f infra/docker-compose.yml up --build agent-api phoenix
+  - curl http://127.0.0.1:8100/health
+  - Manual signed/internal tool call, then verify Phoenix at http://127.0.0.1:6006 and matching ai.runs.trace_id in Postgres.
+
+risk:
+  sensitive: true
+  areas:
+    - Trace attributes must not include PII, raw CLI stdout/stderr, customer names, API keys, or full result payloads.
+    - Existing tool audit sanitization tests must keep passing.
+    - If no run creation endpoint exists, add the smallest support path needed for validation instead of implementing agent workflow logic.
+
+skip:
+  audits:
+    - Full epic re-research.
+    - UI/color/typography review.
+
+next:
+  after_pr: "Closes #5"

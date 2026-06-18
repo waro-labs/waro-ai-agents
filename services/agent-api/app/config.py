@@ -16,6 +16,11 @@ class Settings(BaseSettings):
         alias="PHOENIX_COLLECTOR_ENDPOINT",
     )
     otel_service_name: str = Field(default="waro-ai-agents", alias="OTEL_SERVICE_NAME")
+    otel_enabled: bool = Field(default=True, alias="OTEL_ENABLED")
+    otel_export_timeout_seconds: int = Field(
+        default=5,
+        alias="OTEL_EXPORT_TIMEOUT_SECONDS",
+    )
     environment: Literal["development", "staging", "production", "test"] = Field(
         default="development",
         alias="ENVIRONMENT",
