@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.config import get_settings
 from app.database import DatabasePool
+from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
+from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
 
 
 @asynccontextmanager
@@ -22,6 +24,10 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+
+def get_tool_gateway() -> ToolGateway:
+    return ToolGateway(settings=get_settings())
 
 
 @app.get("/health", tags=["health"])
@@ -42,6 +48,19 @@ async def health() -> dict[str, Any]:
                 if settings.is_signature_verification_enabled
                 else "not_configured"
             ),
-            "signature_verification": "not_implemented",
+            "signature_verification": (
+                "implemented"
+                if settings.is_signature_verification_enabled
+                else "not_configured"
+            ),
         },
     }
+
+
+@app.post("/internal/tools/call", response_model=ToolCallResponse, tags=["tools"])
+async def call_tool(
+    request: ToolCallRequest,
+    context: InternalRequestContext = Depends(require_internal_request),
+    gateway: ToolGateway = Depends(get_tool_gateway),
+) -> ToolCallResponse:
+    return await gateway.call(request=request, context=context)

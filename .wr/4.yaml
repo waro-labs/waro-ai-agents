@@ -1,0 +1,69 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 4
+title: "Implement Waro Tool Gateway for waro-cli"
+repo: waro-ai-agents
+repo_remote: waro-labs/waro-ai-agents
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/waro-ai-agents
+stack: fastapi
+branch: wr-4-implement-waro-tool-gateway
+
+paths:
+  - services/agent-api/app/main.py
+  - services/agent-api/app/config.py
+  - services/agent-api/app/database.py
+  - services/agent-api/app/dependencies/internal_auth.py
+  - services/agent-api/app/tools/
+  - services/agent-api/tests/
+  - services/agent-api/requirements.txt
+  - migrations/001_ai_rag_audit_schemas.sql
+
+ac:
+  - Food cost, menu, sales, and financial read tools work locally through a typed gateway.
+  - Tool schemas are Pydantic models with explicit allowlist and no arbitrary shell path.
+  - Gateway enforces tenant-aware scopes from InternalRequestContext and required/default fields.
+  - Tool calls persist sanitized arguments, results, summaries, and errors to ai.tool_calls.
+  - stderr/errors are captured as sanitized agent context without leaking secrets.
+  - Manual validation command is listed in the PR.
+
+out_of_scope:
+  - Mutating tools beyond draft/dry-run behavior.
+  - Full MCP server packaging.
+  - UI work.
+  - LangGraph food-cost workflow and evals.
+  - OpenTelemetry/Phoenix wiring beyond existing IDs if already available.
+
+hints:
+  entry: "services/agent-api/app/main.py:17 existing FastAPI app; add internal tool route only behind require_internal_request"
+  auth: "services/agent-api/app/dependencies/internal_auth.py:17 context carries tenant_id/profile_id/member_id/scopes"
+  db: "services/agent-api/app/database.py:39 use get_db_connection() for transaction-friendly inserts"
+  audit: "migrations/001_ai_rag_audit_schemas.sql:93 ai.tool_calls columns; line 223 audit.ai_action_events"
+  cli_schema: "../waro-cli/src/commands/schema.rs:15 canonical schema source; read tools at lines 76,95,122,139,222,251"
+  fields: "../waro-cli/src/main.rs:30 global --fields; ../waro-cli/src/output.rs:16 field masking"
+  runner: "construct argv arrays only; force --output json --no-color, timeout, bounded stdout/stderr, explicit env"
+  tests: "use pytest with fake runner/fake connection; avoid real WARO_API_KEY in tests"
+
+validation:
+  - cd services/agent-api && .venv/bin/python -m pytest
+  - cd services/agent-api && .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8100
+  - curl http://127.0.0.1:8100/health
+  - cd ../waro-cli && env -u WARO_API_KEY -u WARO_API_URL -u WARO_PROFILE cargo test -- --test-threads=1
+  - cd ../waro-cli && cargo run -- schema analytics food-cost
+
+risk:
+  sensitive: true
+  areas:
+    - Do not log or persist WARO_API_KEY, DATABASE_URL, internal signatures, raw stderr with secrets, or customer PII.
+    - Do not expose any unauthenticated tool execution route; require internal context for /internal/*.
+    - Do not pass user-provided free-form flags or command strings to subprocess.
+    - Keep result_json bounded/sanitized; prefer compact result_summary for agent context.
+    - Missing signature verifier may require completing auth or keeping route deployment-gated.
+
+skip:
+  audits:
+    - Full epic re-research.
+    - Rewriting migrations or applying production DB changes.
+    - Direct WARO API integration unless CLI path cannot satisfy acceptance criteria.
+    - Business workflow prompts, RAG, Phoenix, and UI.
+
+next:
+  after_pr: "Closes #4"

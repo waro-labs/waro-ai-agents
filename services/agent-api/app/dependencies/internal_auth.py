@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import hashlib
+import hmac
 
 from fastapi import Header, HTTPException, Request, status
 
@@ -23,10 +25,12 @@ async def require_internal_request(
     x_waro_request_id: str | None = Header(default=None),
     x_waro_internal_signature: str | None = Header(default=None),
 ) -> InternalRequestContext:
-    """Placeholder for signed WARO FastAPI -> agent-api requests.
+    """Verify signed WARO FastAPI -> agent-api requests.
 
-    Future batches should verify the signature over method, path, body digest,
-    timestamp, and request id before any internal AI route is enabled.
+    The public API boundary signs the method, path, request id, tenant/profile
+    context, and request body digest. Keeping this small contract here lets
+    route code depend on InternalRequestContext without knowing signature
+    details.
     """
     settings = get_settings()
     missing_headers = [
@@ -55,12 +59,42 @@ async def require_internal_request(
             detail="Internal signature verification is not configured.",
         )
 
-    # Keep the request object in the signature dependency boundary so the
-    # future verifier can consume body/path/method without changing route code.
-    _ = request
-    _ = x_waro_internal_signature
+    body = await request.body()
+    body_digest = hashlib.sha256(body).hexdigest()
+    member_id = x_waro_member_id if isinstance(x_waro_member_id, str) else None
+    canonical = "\n".join(
+        [
+            request.method.upper(),
+            request.url.path,
+            x_waro_request_id or "",
+            x_waro_tenant_id or "",
+            x_waro_profile_id or "",
+            member_id or "",
+            x_waro_scopes or "",
+            body_digest,
+        ]
+    )
+    expected = hmac.new(
+        settings.internal_signature_secret.encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Internal signature verification is not implemented yet.",
+    if not hmac.compare_digest(expected, x_waro_internal_signature or ""):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid internal signature.",
+        )
+
+    scopes = tuple(
+        scope.strip()
+        for scope in (x_waro_scopes or "").split(",")
+        if scope.strip()
+    )
+    return InternalRequestContext(
+        tenant_id=x_waro_tenant_id or "",
+        profile_id=x_waro_profile_id or "",
+        request_id=x_waro_request_id or "",
+        member_id=member_id,
+        scopes=scopes,
     )
