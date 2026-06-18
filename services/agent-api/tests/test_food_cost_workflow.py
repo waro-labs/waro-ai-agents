@@ -5,6 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
+from app.llm.base import LLMMessage, LLMResponse
 from app.tools.models import ToolCallResponse
 from app.workflows.food_cost import FoodCostWorkflow
 from app.workflows.models import FoodCostQuestionRequest
@@ -67,6 +68,21 @@ class FakeGateway:
         )
 
 
+class FakeLLMAdapter:
+    provider = "fake"
+
+    def __init__(self, content: str | None = None, error: Exception | None = None):
+        self.content = content or "Resumen generado por LLM."
+        self.error = error
+        self.calls: list[list[LLMMessage]] = []
+
+    async def complete(self, *, messages, temperature=0.2):
+        self.calls.append(messages)
+        if self.error:
+            raise self.error
+        return LLMResponse(content=self.content, model="fake-model", provider=self.provider)
+
+
 @pytest.mark.asyncio
 async def test_food_cost_workflow_persists_run_tools_message_summary_and_evals():
     connection = FakeConnection()
@@ -127,3 +143,74 @@ async def test_food_cost_workflow_persists_run_tools_message_summary_and_evals()
     assert "INSERT INTO ai.context_summaries" in executed_sql
     assert executed_sql.count("INSERT INTO ai.eval_results") == 3
     assert "status = 'completed'" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_food_cost_workflow_uses_llm_summary_when_enabled():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeLLMAdapter(content="Resumen Kimi de food cost.")
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = FoodCostWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-llm",
+        member_id=None,
+        scopes=("analytics:read", "menu:read", "financial:read"),
+    )
+
+    response = await workflow.run(
+        request=FoodCostQuestionRequest(question="Resume food cost."),
+        context=context,
+    )
+
+    assert response.summary == "Resumen Kimi de food cost."
+    assert len(llm.calls) == 1
+    executed_sql = "\n".join(query for query, _ in connection.executes)
+    assert "INSERT INTO ai.context_summaries" in executed_sql
+    fetched_sql = "\n".join(query for query, _ in connection.fetches)
+    assert "food_cost_summary" in str(connection.fetches)
+    assert "INSERT INTO ai.steps" in fetched_sql
+
+
+@pytest.mark.asyncio
+async def test_food_cost_workflow_falls_back_when_llm_fails():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeLLMAdapter(error=RuntimeError("provider unavailable"))
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = FoodCostWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-llm-fallback",
+        member_id=None,
+        scopes=("analytics:read", "menu:read", "financial:read"),
+    )
+
+    response = await workflow.run(
+        request=FoodCostQuestionRequest(question="Resume food cost."),
+        context=context,
+    )
+
+    assert response.summary.startswith("Food-cost workflow flagged")
+    assert len(llm.calls) == 1

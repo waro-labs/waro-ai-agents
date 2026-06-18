@@ -29,6 +29,20 @@ curl http://127.0.0.1:8100/health
 the tool gateway executes a WARO tool. Keep API keys in your local `.env`; do
 not commit them.
 
+LLM summaries are disabled by default. To enable Kimi/Moonshot for workflow
+summaries, set these values in `services/agent-api/.env`:
+
+```bash
+LLM_PROVIDER=kimi
+KIMI_API_KEY=moonshot-or-kimi-key
+KIMI_BASE_URL=https://api.moonshot.ai/v1
+KIMI_MODEL=kimi-k2
+LLM_TIMEOUT_SECONDS=30
+```
+
+Kimi summarizes validated workflow artifacts only. Tool execution still goes
+through the allowlisted `ToolGateway`.
+
 The local CLI binary lives at `services/agent-api/.local/bin/waro`. That path is
 ignored by git so local builds and copied binaries do not enter the repository.
 You can also copy an already installed binary into the service-owned path:

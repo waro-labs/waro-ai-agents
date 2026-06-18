@@ -3,11 +3,15 @@ from typing import Any, TypedDict
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from app.config import Settings
 from app.database import get_db_connection
 from app.dependencies.internal_auth import InternalRequestContext
 from app.evals.food_cost import evaluate_food_cost_artifact
+from app.llm import LLMAdapter, get_llm_adapter
+from app.llm.prompts import food_cost_summary_messages
 from app.tools import ToolCallRequest, ToolGateway
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import FoodCostQuestionRequest, FoodCostWorkflowResponse
@@ -35,6 +39,7 @@ class FoodCostWorkflow:
         *,
         settings: Settings,
         gateway: ToolGateway | None = None,
+        llm_adapter: LLMAdapter | None = None,
         connection_factory: Any = get_db_connection,
     ):
         self.settings = settings
@@ -43,6 +48,8 @@ class FoodCostWorkflow:
             settings=settings,
             connection_factory=connection_factory,
         )
+        self.llm_adapter = llm_adapter or get_llm_adapter(settings)
+        self.tracer = trace.get_tracer(__name__)
         self.graph = self._build_graph()
 
     async def run(
@@ -125,7 +132,11 @@ class FoodCostWorkflow:
             request=state["request"],
             tool_calls=state["tool_calls"],
         )
-        summary = self._build_summary(artifact)
+        summary = await self._build_summary_with_llm(
+            artifact=artifact,
+            context=state["context"],
+            run_id=state["run_id"],
+        )
         return {
             "artifact": artifact,
             "summary": summary,
@@ -419,6 +430,67 @@ class FoodCostWorkflow:
             if product.get("name") or product.get("id")
         )
         return f"Food-cost workflow flagged {len(products)} low-margin products: {product_names}."
+
+    async def _build_summary_with_llm(
+        self,
+        *,
+        artifact: dict[str, Any],
+        context: InternalRequestContext,
+        run_id: UUID,
+    ) -> str:
+        fallback_summary = self._build_summary(artifact)
+        if self.settings.llm_provider == "disabled":
+            return fallback_summary
+
+        with self.tracer.start_as_current_span("llm.food_cost.summary") as span:
+            span.set_attribute("llm.provider", self.llm_adapter.provider)
+            span.set_attribute("waro.run_id", str(run_id))
+            span.set_attribute("waro.tenant_id", context.tenant_id)
+            if self.settings.llm_provider == "kimi":
+                span.set_attribute("llm.model", self.settings.kimi_model)
+
+            try:
+                response = await self.llm_adapter.complete(
+                    messages=food_cost_summary_messages(artifact),
+                    temperature=0.2,
+                )
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                await self._record_step(
+                    run_id=run_id,
+                    tenant_id=context.tenant_id,
+                    step_type="llm",
+                    name="food_cost_summary",
+                    input_json={
+                        "provider": self.settings.llm_provider,
+                        "model": self.settings.kimi_model
+                        if self.settings.llm_provider == "kimi"
+                        else None,
+                    },
+                    output_json={"fallback": True, "error_type": type(exc).__name__},
+                    output_summary=fallback_summary,
+                )
+                return fallback_summary
+
+            summary = response.content.strip() or fallback_summary
+            span.set_attribute("llm.model", response.model)
+            span.set_attribute("llm.response.provider", response.provider)
+            span.set_status(Status(StatusCode.OK))
+            await self._record_step(
+                run_id=run_id,
+                tenant_id=context.tenant_id,
+                step_type="llm",
+                name="food_cost_summary",
+                input_json={
+                    "provider": response.provider,
+                    "model": response.model,
+                    "message_count": 2,
+                },
+                output_json={"fallback": summary == fallback_summary},
+                output_summary=summary,
+            )
+            return summary
 
     async def _finish_run(
         self,
