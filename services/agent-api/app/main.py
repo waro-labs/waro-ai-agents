@@ -6,12 +6,14 @@ from fastapi import Depends, FastAPI
 from app.config import get_settings
 from app.database import DatabasePool
 from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
+from app.telemetry import configure_tracing, instrument_app
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.settings = get_settings()
+    configure_tracing(app.state.settings)
     yield
     await DatabasePool.close_pool()
 
@@ -24,6 +26,7 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+instrument_app(app, get_settings())
 
 
 def get_tool_gateway() -> ToolGateway:
@@ -41,6 +44,7 @@ async def health() -> dict[str, Any]:
             "postgres": "configured",
             "redis": "configured",
             "phoenix": "configured",
+            "tracing": "enabled" if settings.otel_enabled else "disabled",
         },
         "internal_auth": {
             "signature_secret": (

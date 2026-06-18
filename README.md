@@ -50,9 +50,11 @@ context to this service.
 - FastAPI app skeleton in `services/agent-api`.
 - Settings for Postgres, Redis, Phoenix/OTLP, environment, host/port, and
   internal signature secret.
+- OpenTelemetry trace setup for FastAPI requests and tool execution, exporting
+  to Phoenix over OTLP.
 - `GET /health` endpoint for local startup validation.
 - Lazy asyncpg pool helper for future DB work.
-- Fail-closed internal request dependency placeholder.
+- Fail-closed internal request dependency with HMAC signature verification.
 - Dockerfile and local compose wiring.
 - Draft Postgres schemas for `ai`, `rag`, and `audit`.
 - Database and architecture notes in `docs/`.
@@ -118,11 +120,12 @@ Expected shape:
   "dependencies": {
     "postgres": "configured",
     "redis": "configured",
-    "phoenix": "configured"
+    "phoenix": "configured",
+    "tracing": "enabled"
   },
   "internal_auth": {
     "signature_secret": "not_configured",
-    "signature_verification": "not_implemented"
+    "signature_verification": "not_configured"
   }
 }
 ```
@@ -139,6 +142,22 @@ If your local Docker install uses the legacy binary:
 docker-compose -f infra/docker-compose.yml up --build agent-api
 ```
 
+To inspect traces locally, start Phoenix with the service:
+
+```bash
+docker compose -f infra/docker-compose.yml up --build agent-api phoenix
+```
+
+Then open <http://127.0.0.1:6006>. Send a signed internal tool call through
+`POST /internal/tools/call`, find the trace in Phoenix, and verify the same
+trace id is stored on the matching run:
+
+```sql
+SELECT id, trace_id, started_at
+FROM ai.runs
+WHERE id = '<run-id>';
+```
+
 ## Configuration
 
 See `.env.example`.
@@ -148,6 +167,8 @@ DATABASE_URL=postgresql://saifer:change-me@postgres:5432/postresWaroLabs
 REDIS_URL=redis://redis:6379/0
 PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:4317
 OTEL_SERVICE_NAME=waro-ai-agents
+OTEL_ENABLED=true
+OTEL_EXPORT_TIMEOUT_SECONDS=5
 ENVIRONMENT=development
 INTERNAL_SIGNATURE_SECRET=
 ```
@@ -167,7 +188,8 @@ Expected signed context headers from WARO FastAPI:
 - `x-waro-request-id`
 - `x-waro-internal-signature`
 
-The current dependency fails closed until signature verification is implemented.
+The dependency fails closed when `INTERNAL_SIGNATURE_SECRET` is missing and
+verifies HMAC signatures when the secret is configured.
 
 ## Storage boundaries
 
@@ -203,6 +225,7 @@ Phoenix is for trace inspection, not business source of truth.
 
 ```bash
 cd services/agent-api && python -m compileall app
+cd services/agent-api && pytest
 cd services/agent-api && uvicorn app.main:app --host 127.0.0.1 --port 8100
 curl http://127.0.0.1:8100/health
 docker compose -f infra/docker-compose.yml config

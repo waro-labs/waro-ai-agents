@@ -44,7 +44,29 @@ class ToolCallAudit:
         arguments: dict[str, Any],
         dry_run: bool,
         idempotency_key: str | None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> UUID:
+        if trace_id:
+            await self.connection.execute(
+                """
+                UPDATE ai.runs
+                SET trace_id = COALESCE(trace_id, $1)
+                WHERE id = $2
+                """,
+                trace_id,
+                run_id,
+            )
+        if step_id and span_id:
+            await self.connection.execute(
+                """
+                UPDATE ai.steps
+                SET span_id = COALESCE(span_id, $1)
+                WHERE id = $2
+                """,
+                span_id,
+                step_id,
+            )
         row = await self.connection.fetchrow(
             """
             INSERT INTO ai.tool_calls (
