@@ -35,6 +35,10 @@ class FoodCostArgs(ToolArgs):
 
 
 class MenuProductsArgs(ToolArgs):
+    flag_args: ClassVar[frozenset[str]] = ToolArgs.flag_args | frozenset(
+        {"include-ingredients", "include-recipe-bases", "include-modifiers"}
+    )
+
     limit: int = Field(default=50, ge=1, le=250)
     offset: int = Field(default=0, ge=0)
     all: bool = False

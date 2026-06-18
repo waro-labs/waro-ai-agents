@@ -77,9 +77,7 @@ def test_args_reject_extra_flags_and_build_typed_cli_args():
         "--is-available",
         "true",
         "--include-recipe-bases",
-        "true",
         "--include-modifiers",
-        "true",
     ]
 
 
