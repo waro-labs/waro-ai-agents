@@ -13,6 +13,11 @@ class LLMResponse:
     content: str
     model: str
     provider: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    cost_source: str = "unavailable"
 
 
 class LLMError(Exception):

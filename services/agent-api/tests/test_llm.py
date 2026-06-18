@@ -7,6 +7,7 @@ from app.config import Settings
 from app.llm.base import LLMError, LLMMessage
 from app.llm.factory import get_llm_adapter
 from app.llm.kimi import KimiAdapter
+from app.llm.pricing import estimate_llm_cost
 
 
 @pytest.mark.asyncio
@@ -27,7 +28,14 @@ async def test_kimi_adapter_builds_openai_compatible_request():
         captured["payload"] = json.loads(request.content.decode("utf-8"))
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "Resumen desde Kimi."}}]},
+            json={
+                "choices": [{"message": {"content": "Resumen desde Kimi."}}],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 250,
+                    "total_tokens": 1250,
+                },
+            },
         )
 
     adapter = KimiAdapter(
@@ -61,6 +69,63 @@ async def test_kimi_adapter_builds_openai_compatible_request():
     assert response.content == "Resumen desde Kimi."
     assert response.model == "kimi-test"
     assert response.provider == "kimi"
+    assert response.input_tokens == 1000
+    assert response.output_tokens == 250
+    assert response.total_tokens == 1250
+    assert response.estimated_cost_usd is None
+    assert response.cost_source == "pricing_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_kimi_adapter_estimates_known_model_cost():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 500},
+            },
+        )
+
+    adapter = KimiAdapter(
+        Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-k2.7-code",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = await adapter.complete(messages=[LLMMessage(role="user", content="hola")])
+
+    assert response.input_tokens == 1000
+    assert response.output_tokens == 500
+    assert response.total_tokens == 1500
+    assert response.estimated_cost_usd == 0.00249
+    assert response.cost_source == "static:estimated-kimi-pricing-2026-06-18"
+
+
+@pytest.mark.asyncio
+async def test_kimi_adapter_handles_missing_usage_without_cost():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    adapter = KimiAdapter(
+        Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-k2.7-code",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = await adapter.complete(messages=[LLMMessage(role="user", content="hola")])
+
+    assert response.input_tokens is None
+    assert response.output_tokens is None
+    assert response.total_tokens is None
+    assert response.estimated_cost_usd is None
+    assert response.cost_source == "usage_unavailable"
 
 
 @pytest.mark.asyncio
@@ -69,6 +134,18 @@ async def test_kimi_adapter_requires_api_key_at_completion_time():
 
     with pytest.raises(LLMError):
         await adapter.complete(messages=[LLMMessage(role="user", content="hola")])
+
+
+def test_llm_cost_estimate_unknown_model_falls_back():
+    estimate = estimate_llm_cost(
+        provider="kimi",
+        model="unknown-model",
+        input_tokens=100,
+        output_tokens=50,
+    )
+
+    assert estimate.estimated_cost_usd is None
+    assert estimate.source == "pricing_unavailable"
 
 
 @pytest.mark.asyncio

@@ -71,15 +71,23 @@ class FakeGateway:
 class FakeLLMAdapter:
     provider = "fake"
 
-    def __init__(self, content: str | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        content: str | None = None,
+        error: Exception | None = None,
+        response: LLMResponse | None = None,
+    ):
         self.content = content or "Resumen generado por LLM."
         self.error = error
+        self.response = response
         self.calls: list[list[LLMMessage]] = []
 
     async def complete(self, *, messages, temperature=0.2):
         self.calls.append(messages)
         if self.error:
             raise self.error
+        if self.response:
+            return self.response
         return LLMResponse(content=self.content, model="fake-model", provider=self.provider)
 
 
@@ -181,6 +189,62 @@ async def test_food_cost_workflow_uses_llm_summary_when_enabled():
     fetched_sql = "\n".join(query for query, _ in connection.fetches)
     assert "food_cost_summary" in str(connection.fetches)
     assert "INSERT INTO ai.steps" in fetched_sql
+
+
+@pytest.mark.asyncio
+async def test_food_cost_workflow_persists_llm_usage_cost_metadata():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeLLMAdapter(
+        response=LLMResponse(
+            content="Resumen con costo.",
+            model="kimi-k2.7-code",
+            provider="kimi",
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            estimated_cost_usd=0.00249,
+            cost_source="static:estimated-kimi-pricing-2026-06-18",
+        )
+    )
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = FoodCostWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-llm-cost",
+        member_id=None,
+        scopes=("analytics:read", "menu:read", "financial:read"),
+    )
+
+    response = await workflow.run(
+        request=FoodCostQuestionRequest(question="Resume food cost."),
+        context=context,
+    )
+
+    assert response.summary == "Resumen con costo."
+    llm_step_args = [
+        args
+        for query, args in connection.fetches
+        if "INSERT INTO ai.steps" in query and args[2] == "llm"
+    ][0]
+    output_json = llm_step_args[5]
+    assert '"input_count": 1000' in output_json
+    assert '"output_count": 500' in output_json
+    assert '"total_count": 1500' in output_json
+    assert '"estimated_cost_usd": 0.00249' in output_json
+    assert "static:estimated-kimi-pricing-2026-06-18" in output_json
+    assert "test-key" not in output_json
+    assert "Resume food cost" not in output_json
 
 
 @pytest.mark.asyncio
