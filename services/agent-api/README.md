@@ -49,6 +49,43 @@ table for known models and writes estimated usage/cost metadata to Phoenix
 spans and safe workflow audit metadata. The Kimi dashboard remains the source
 of truth for billing.
 
+## Streaming contract
+
+AI workflow streaming uses Server-Sent Events with `text/event-stream` frames.
+Each frame uses the SSE `event:` field and a single JSON `data:` object:
+
+```text
+event: tool_finished
+data: {"event":"tool_finished","emitted_at":"2026-06-18T12:00:00+00:00","run_id":"<run-id>","tool_name":"waro.menu.products","status":"succeeded","result_summary":"Returned 1 row."}
+```
+
+Initial event names are:
+
+- `run_started`
+- `step_started`
+- `tool_started`
+- `tool_finished`
+- `llm_started`
+- `token`
+- `final`
+- `error`
+
+Every JSON payload includes `event`, `emitted_at`, and `run_id` when a run has
+been created. Workflow events should include ids, workflow names, status,
+provider/model, tool names, safe argument summaries, tool call ids, result
+summaries, usage/cost metadata, and sanitized errors as needed.
+
+Prompt text, user message content, assistant completion content, and raw LLM
+messages must not be duplicated into event metadata or Phoenix traces. The
+`token` event is reserved for explicit Kimi token streaming work; until that is
+implemented, LLM events should only expose provider/model and safe metadata.
+
+Tool failures should use `tool_finished` with `status=failed` when the workflow
+can continue or report a tool-level result. Terminal workflow failures should
+emit `error` with `status=failed` and a sanitized `error` object. `final` should
+return final ids plus the user-facing summary and a deliberate artifact summary
+or artifact payload chosen by the endpoint contract.
+
 The local CLI binary lives at `services/agent-api/.local/bin/waro`. That path is
 ignored by git so local builds and copied binaries do not enter the repository.
 You can also copy an already installed binary into the service-owned path:
