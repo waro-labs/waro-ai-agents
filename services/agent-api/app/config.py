@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     waro_api_key: str | None = Field(default=None, alias="WARO_API_KEY")
     tool_timeout_seconds: int = Field(default=30, alias="TOOL_TIMEOUT_SECONDS")
     tool_result_max_bytes: int = Field(default=200_000, alias="TOOL_RESULT_MAX_BYTES")
+    llm_provider: Literal["disabled", "kimi"] = Field(
+        default="disabled",
+        alias="LLM_PROVIDER",
+    )
+    kimi_api_key: str | None = Field(default=None, alias="KIMI_API_KEY")
+    kimi_base_url: str = Field(
+        default="https://api.moonshot.ai/v1",
+        alias="KIMI_BASE_URL",
+    )
+    kimi_model: str = Field(default="kimi-k2", alias="KIMI_MODEL")
+    llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
