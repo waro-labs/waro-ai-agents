@@ -17,15 +17,20 @@ class CostEstimate:
 KIMI_PRICING: dict[str, ModelPricing] = {
     # Official Kimi pricing is per 1M consumed tokens. Keep this table small
     # and explicit so unknown models fail open with token usage but no cost.
+    "moonshot-v1-8k": ModelPricing(
+        input_usd_per_1m=0.20,
+        output_usd_per_1m=2.00,
+        source="static:official-kimi-pricing-2026-06-18",
+    ),
     "kimi-k2.7-code": ModelPricing(
-        input_usd_per_1m=0.74,
-        output_usd_per_1m=3.50,
-        source="static:estimated-kimi-pricing-2026-06-18",
+        input_usd_per_1m=0.95,
+        output_usd_per_1m=4.00,
+        source="static:official-kimi-pricing-2026-06-18",
     ),
     "kimi-k2.7-code-highspeed": ModelPricing(
-        input_usd_per_1m=0.74,
-        output_usd_per_1m=3.50,
-        source="static:estimated-kimi-pricing-2026-06-18",
+        input_usd_per_1m=1.90,
+        output_usd_per_1m=8.00,
+        source="static:official-kimi-pricing-2026-06-18",
     ),
 }
 

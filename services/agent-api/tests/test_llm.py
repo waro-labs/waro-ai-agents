@@ -101,8 +101,34 @@ async def test_kimi_adapter_estimates_known_model_cost():
     assert response.input_tokens == 1000
     assert response.output_tokens == 500
     assert response.total_tokens == 1500
-    assert response.estimated_cost_usd == 0.00249
-    assert response.cost_source == "static:estimated-kimi-pricing-2026-06-18"
+    assert response.estimated_cost_usd == 0.00295
+    assert response.cost_source == "static:official-kimi-pricing-2026-06-18"
+
+
+@pytest.mark.asyncio
+async def test_kimi_adapter_estimates_cheapest_moonshot_model_cost():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 500},
+            },
+        )
+
+    adapter = KimiAdapter(
+        Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="moonshot-v1-8k",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = await adapter.complete(messages=[LLMMessage(role="user", content="hola")])
+
+    assert response.estimated_cost_usd == 0.0012
+    assert response.cost_source == "static:official-kimi-pricing-2026-06-18"
 
 
 @pytest.mark.asyncio

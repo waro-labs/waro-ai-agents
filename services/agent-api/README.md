@@ -36,7 +36,7 @@ summaries, set these values in `services/agent-api/.env`:
 LLM_PROVIDER=kimi
 KIMI_API_KEY=moonshot-or-kimi-key
 KIMI_BASE_URL=https://api.moonshot.ai/v1
-KIMI_MODEL=kimi-k2
+KIMI_MODEL=moonshot-v1-8k
 LLM_TIMEOUT_SECONDS=30
 ```
 

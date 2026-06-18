@@ -45,7 +45,7 @@ class Settings(BaseSettings):
         default="https://api.moonshot.ai/v1",
         alias="KIMI_BASE_URL",
     )
-    kimi_model: str = Field(default="kimi-k2", alias="KIMI_MODEL")
+    kimi_model: str = Field(default="moonshot-v1-8k", alias="KIMI_MODEL")
     llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
