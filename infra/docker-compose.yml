@@ -1,0 +1,31 @@
+services:
+  agent-api:
+    build:
+      context: ../services/agent-api
+    env_file:
+      - ../.env
+    ports:
+      - "127.0.0.1:8100:8100"
+    networks:
+      - postgresqlwarolabs_default
+      - waro_ai_internal
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - waro_ai_internal
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "127.0.0.1:6006:6006"
+      - "127.0.0.1:4317:4317"
+    networks:
+      - waro_ai_internal
+
+networks:
+  waro_ai_internal:
+  postgresqlwarolabs_default:
+    external: true
