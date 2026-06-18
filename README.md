@@ -208,6 +208,30 @@ curl http://127.0.0.1:8100/health
 docker compose -f infra/docker-compose.yml config
 ```
 
+Validate the initial database schemas without persisting changes:
+
+```bash
+set -a
+source ../api_warocol.com/.env
+set +a
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -X -q \
+  -c "BEGIN;" \
+  -f migrations/001_ai_rag_audit_schemas.sql \
+  -c "ROLLBACK;"
+```
+
+Apply the schemas when ready:
+
+```bash
+set -a
+source ../api_warocol.com/.env
+set +a
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_ai_rag_audit_schemas.sql
+```
+
+See [Database analysis](docs/db-analysis.md) for verification and rollback
+queries.
+
 ## License
 
 This repository is publicly visible as source-available proprietary software.
