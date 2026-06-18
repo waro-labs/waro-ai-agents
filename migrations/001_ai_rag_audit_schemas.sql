@@ -1,5 +1,6 @@
 -- Initial WARO AI agent schemas.
--- Draft only: review before applying.
+-- Creates only the ai, rag, and audit schemas; public tables are referenced
+-- by foreign keys but are not rewritten by this migration.
 
 CREATE SCHEMA IF NOT EXISTS ai;
 CREATE SCHEMA IF NOT EXISTS rag;

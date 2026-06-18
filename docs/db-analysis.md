@@ -112,3 +112,74 @@ These existing eval tables appear domain-specific and should not be reused direc
 - `audit`: sensitive AI action audit events.
 
 See `migrations/001_ai_rag_audit_schemas.sql`.
+
+## Migration 001 Operations
+
+Apply the initial agent schemas from the `waro-ai-agents` repository root after
+loading the local database URL. Do not print the database URL in logs or PRs.
+
+```bash
+set -a
+source ../api_warocol.com/.env
+set +a
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_ai_rag_audit_schemas.sql
+```
+
+For a non-destructive local check, run the migration inside a transaction and
+roll it back:
+
+```bash
+set -a
+source ../api_warocol.com/.env
+set +a
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -X -q \
+  -c "BEGIN;" \
+  -f migrations/001_ai_rag_audit_schemas.sql \
+  -c "ROLLBACK;"
+```
+
+Verification query:
+
+```sql
+SELECT extname, extversion
+FROM pg_extension
+WHERE extname = 'vector';
+
+SELECT to_regclass('public.tenants') AS tenants_table,
+       to_regclass('public.profile') AS profile_table;
+
+SELECT schemaname, count(*) AS table_count
+FROM pg_tables
+WHERE schemaname IN ('ai', 'rag', 'audit')
+GROUP BY schemaname
+ORDER BY schemaname;
+
+SELECT schemaname, tablename, indexname
+FROM pg_indexes
+WHERE schemaname IN ('ai', 'rag', 'audit')
+ORDER BY schemaname, tablename, indexname;
+
+SELECT conrelid::regclass AS table_name,
+       confrelid::regclass AS referenced_table,
+       conname AS constraint_name
+FROM pg_constraint
+WHERE contype = 'f'
+  AND connamespace IN (
+    'ai'::regnamespace,
+    'rag'::regnamespace,
+    'audit'::regnamespace
+  )
+ORDER BY table_name::text, constraint_name;
+```
+
+Rollback, only after explicit confirmation:
+
+```sql
+DROP SCHEMA audit, rag, ai CASCADE;
+```
+
+The migration keeps the current `public` operational tables untouched except for
+foreign key references to `public.tenants(id)` and `public.profile(id)`.
+`rag.chunks.embedding` intentionally starts as `vector(1536)` to match the first
+OpenAI small embedding strategy. The initial HNSW index is acceptable while the
+table is empty; future large-table rebuilds should be planned separately.
