@@ -43,6 +43,12 @@ LLM_TIMEOUT_SECONDS=30
 Kimi summarizes validated workflow artifacts only. Tool execution still goes
 through the allowlisted `ToolGateway`.
 
+LLM token usage and cost metadata are best-effort estimates. `agent-api` uses
+the token counts returned by Kimi when present, then applies a local pricing
+table for known models and writes estimated usage/cost metadata to Phoenix
+spans and safe workflow audit metadata. The Kimi dashboard remains the source
+of truth for billing.
+
 The local CLI binary lives at `services/agent-api/.local/bin/waro`. That path is
 ignored by git so local builds and copied binaries do not enter the repository.
 You can also copy an already installed binary into the service-owned path:

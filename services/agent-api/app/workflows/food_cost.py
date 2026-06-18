@@ -476,6 +476,15 @@ class FoodCostWorkflow:
             summary = response.content.strip() or fallback_summary
             span.set_attribute("llm.model", response.model)
             span.set_attribute("llm.response.provider", response.provider)
+            if response.input_tokens is not None:
+                span.set_attribute("llm.usage.prompt_tokens", response.input_tokens)
+            if response.output_tokens is not None:
+                span.set_attribute("llm.usage.completion_tokens", response.output_tokens)
+            if response.total_tokens is not None:
+                span.set_attribute("llm.usage.total_tokens", response.total_tokens)
+            if response.estimated_cost_usd is not None:
+                span.set_attribute("llm.cost.estimated_usd", response.estimated_cost_usd)
+            span.set_attribute("llm.cost.source", response.cost_source)
             span.set_status(Status(StatusCode.OK))
             await self._record_step(
                 run_id=run_id,
@@ -487,7 +496,18 @@ class FoodCostWorkflow:
                     "model": response.model,
                     "message_count": 2,
                 },
-                output_json={"fallback": summary == fallback_summary},
+                output_json={
+                    "fallback": summary == fallback_summary,
+                    "llm_usage": {
+                        "input_count": response.input_tokens,
+                        "output_count": response.output_tokens,
+                        "total_count": response.total_tokens,
+                    },
+                    "llm_cost": {
+                        "estimated_cost_usd": response.estimated_cost_usd,
+                        "source": response.cost_source,
+                    },
+                },
                 output_summary=summary,
             )
             return summary
