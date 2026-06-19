@@ -27,9 +27,14 @@ class FakeConnection:
         self.fetches = []
         self.executes = []
         self.ids = [uuid4() for _ in range(20)]
+        self.latest_context_summary: str | None = None
 
     async def fetchrow(self, query, *args):
         self.fetches.append((query, args))
+        if "FROM ai.context_summaries" in query:
+            if self.latest_context_summary is None:
+                return None
+            return {"summary": self.latest_context_summary}
         return {"id": self.ids.pop(0)}
 
     async def execute(self, query, *args):
@@ -170,6 +175,11 @@ def test_sales_workflow_routes_small_talk_without_sales_tool():
     assert workflow._resolve_sales_intent("funcionas") == "small_talk"
     assert workflow._resolve_sales_intent("hola, dame las ventas de ayer") == "sales_metrics"
     assert workflow._resolve_sales_intent("dime las ventas de los ultimos 15 dias") == "sales_metrics"
+    assert (
+        workflow._resolve_sales_intent("como asi", has_conversation_context=True)
+        == "follow_up"
+    )
+    assert workflow._resolve_sales_intent("como asi") == "sales_metrics"
 
 
 def test_sales_workflow_resolves_answer_style():
@@ -424,6 +434,48 @@ async def test_sales_workflow_plans_auxiliary_financial_tool_for_product_context
 
 
 @pytest.mark.asyncio
+async def test_sales_workflow_plans_financial_tool_for_financial_analysis():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(),
+        gateway=gateway,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-financial-analysis",
+        member_id=None,
+        scopes=("orders:read", "financial:read"),
+    )
+
+    response = await workflow.run(
+        request=SalesQuestionRequest(
+            question="realiza un analisis financiero del mes de junio",
+            date_from="2026-06-01",
+            date_to="2026-06-19",
+        ),
+        context=context,
+    )
+
+    assert response.artifact["answer_style"] == "financial_analysis"
+    assert [call.tool_name for call in gateway.calls] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+    ]
+    assert gateway.calls[1].arguments == {"sort-by": "margin", "period": 19}
+    assert response.artifact["auxiliary_context"]["financial_products"][0]["name"] == (
+        "Burger"
+    )
+
+
+@pytest.mark.asyncio
 async def test_sales_workflow_handles_small_talk_without_tool_call():
     connection = FakeConnection()
     gateway = FakeGateway()
@@ -468,6 +520,52 @@ async def test_sales_workflow_handles_small_talk_without_tool_call():
     )
     assert "small_talk" in step_payloads
     assert "tool_planned" in step_payloads
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_handles_follow_up_with_conversation_context():
+    connection = FakeConnection()
+    connection.latest_context_summary = (
+        "El 2026-06-18 vendiste $423.000 en 17 ordenes. "
+        "Ticket promedio: $24.882."
+    )
+    gateway = FakeGateway()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(),
+        gateway=gateway,
+        connection_factory=connection_factory,
+    )
+    conversation_id = uuid4()
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-follow-up",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    response = await workflow.run(
+        request=SalesQuestionRequest(
+            question="como asi?",
+            conversation_id=conversation_id,
+        ),
+        context=context,
+    )
+
+    assert response.artifact["intent"] == "follow_up"
+    assert response.artifact["previous_context_summary"] == connection.latest_context_summary
+    assert gateway.calls == []
+    assert response.summary.startswith("Claro. Me referia a esto:")
+    assert all(eval_result.passed for eval_result in response.evals)
+    assert any(
+        "FROM ai.context_summaries" in query
+        for query, _ in connection.fetches
+    )
 
 
 @pytest.mark.asyncio

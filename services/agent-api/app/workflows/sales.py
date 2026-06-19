@@ -69,6 +69,7 @@ AnswerStyle = Literal[
     "business_analysis",
     "financial_analysis",
     "diagnostic",
+    "follow_up",
 ]
 
 
@@ -210,11 +211,18 @@ class SalesWorkflow:
                     ):
                         yield event
 
+                previous_context_summary = None
+                if sales_intent == "follow_up":
+                    previous_context_summary = await self._load_latest_context_summary(
+                        request=request,
+                        context=context,
+                    )
                 artifact = self._build_artifact(
                     request=request,
                     tool_calls=tool_calls,
                     intent=sales_intent,
                     tool_plan=tool_plan,
+                    previous_context_summary=previous_context_summary,
                 )
                 span.set_attribute("waro.answer.style", artifact.get("answer_style", ""))
                 span.set_attribute("waro.tool.call_count", len(tool_calls))
@@ -308,20 +316,28 @@ class SalesWorkflow:
 
     async def _route_sales(self, state: SalesGraphState) -> SalesGraphState:
         with self.tracer.start_as_current_span("sales.route_intent") as span:
-            intent = self._resolve_sales_intent(state["request"].question)
+            has_conversation_context = state["request"].conversation_id is not None
+            intent = self._resolve_sales_intent(
+                state["request"].question,
+                has_conversation_context=has_conversation_context,
+            )
             span.set_attribute("openinference.span.kind", "CHAIN")
             span.set_attribute("waro.workflow.name", self.graph_name)
             span.set_attribute("waro.run_id", str(state["run_id"]))
             span.set_attribute("waro.tenant_id", state["context"].tenant_id)
             span.set_attribute("waro.sales.intent", intent)
             span.set_attribute("waro.sales.tool_planned", intent == "sales_metrics")
+            span.set_attribute("waro.conversation.has_context", has_conversation_context)
             span.set_attribute("waro.request.question_length", len(state["request"].question))
             await self._record_step(
                 run_id=state["run_id"],
                 tenant_id=state["context"].tenant_id,
                 step_type="router",
                 name="sales_intent_router",
-                input_json={"question_length": len(state["request"].question)},
+                input_json={
+                    "question_length": len(state["request"].question),
+                    "has_conversation_context": has_conversation_context,
+                },
                 output_json={
                     "intent": intent,
                     "tool_planned": intent == "sales_metrics",
@@ -359,6 +375,12 @@ class SalesWorkflow:
             tool_calls = state.get("tool_calls", [])
             tool_plan = state.get("tool_plan")
             intent = state.get("sales_intent", "sales_metrics")
+            previous_context_summary = None
+            if intent == "follow_up":
+                previous_context_summary = await self._load_latest_context_summary(
+                    request=state["request"],
+                    context=state["context"],
+                )
             span.set_attribute("waro.sales.intent", intent)
             span.set_attribute("waro.tool.call_count", len(tool_calls))
             artifact = self._build_artifact(
@@ -366,6 +388,7 @@ class SalesWorkflow:
                 tool_calls=tool_calls,
                 intent=intent,
                 tool_plan=tool_plan,
+                previous_context_summary=previous_context_summary,
             )
             span.set_attribute("waro.answer.style", artifact.get("answer_style", ""))
             metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
@@ -838,6 +861,7 @@ class SalesWorkflow:
         tool_calls: list[dict[str, Any]],
         intent: str = "sales_metrics",
         tool_plan: dict[str, Any] | None = None,
+        previous_context_summary: str | None = None,
     ) -> dict[str, Any]:
         if intent == "small_talk":
             return {
@@ -847,6 +871,18 @@ class SalesWorkflow:
                 "metrics": {},
                 "highlights": ["Small talk handled without querying sales metrics."],
                 "explanation": "Sales metrics were not queried because the message was conversational.",
+                "tool_plan": None,
+                "tool_calls": [],
+            }
+        if intent == "follow_up":
+            return {
+                "intent": "follow_up",
+                "answer_style": "follow_up",
+                "period": None,
+                "metrics": {},
+                "previous_context_summary": truncate_text(previous_context_summary or "", 1200),
+                "highlights": ["Follow-up handled from conversation context."],
+                "explanation": "Sales metrics were not queried because the message refers to prior context.",
                 "tool_plan": None,
                 "tool_calls": [],
             }
@@ -930,10 +966,21 @@ class SalesWorkflow:
             return str(value) if value else "tool_error"
         return type(error).__name__
 
-    def _resolve_sales_intent(self, question: str) -> Literal["sales_metrics", "small_talk"]:
+    def _resolve_sales_intent(
+        self,
+        question: str,
+        *,
+        has_conversation_context: bool = False,
+    ) -> Literal["sales_metrics", "small_talk", "follow_up"]:
         normalized = self._normalize_question(question)
         if self._is_small_talk(normalized) and not self._has_sales_signal(normalized):
             return "small_talk"
+        if (
+            has_conversation_context
+            and self._is_follow_up(normalized)
+            and not self._has_sales_signal(normalized)
+        ):
+            return "follow_up"
         return "sales_metrics"
 
     def _fallback_semantic_sales_plan(self, request: SalesQuestionRequest) -> dict[str, Any]:
@@ -943,7 +990,10 @@ class SalesWorkflow:
         if group_by is None and self._needs_daily_breakdown(normalized):
             group_by = "date"
         return {
-            "intent": self._resolve_sales_intent(request.question),
+            "intent": self._resolve_sales_intent(
+                request.question,
+                has_conversation_context=request.conversation_id is not None,
+            ),
             "period": period,
             "group_by": group_by,
             "answer_style": self._resolve_answer_style(request.question),
@@ -1069,6 +1119,15 @@ class SalesWorkflow:
 
     def _is_small_talk(self, normalized: str) -> bool:
         return any(re.search(pattern, normalized) for pattern in SMALL_TALK_PATTERNS)
+
+    def _is_follow_up(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(como asi|por que|porque|explicame|explica eso|que significa|"
+                r"a que te refieres|amplia|ampliame|detalle eso|y eso|eso que quiere decir)\b",
+                normalized,
+            )
+        )
 
     def _has_sales_signal(self, normalized: str) -> bool:
         return any(re.search(pattern, normalized) for pattern in SALES_SIGNAL_PATTERNS)
@@ -1296,6 +1355,14 @@ class SalesWorkflow:
                 "Hola, estoy funcionando. Puedes preguntarme por ventas, por ejemplo: "
                 "dame las ventas de ayer o dime las ventas de los ultimos 15 dias."
             )
+        if artifact.get("intent") == "follow_up":
+            previous = str(artifact.get("previous_context_summary") or "").strip()
+            if previous:
+                return f"Claro. Me referia a esto: {previous}"
+            return (
+                "Claro. Necesito un poco mas de contexto para explicar ese punto. "
+                "Preguntame sobre la ultima metrica, un producto, una fecha o un margen especifico."
+            )
         metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
         answer_style = artifact.get("answer_style")
         total_sales = metrics.get("total_sales")
@@ -1326,7 +1393,7 @@ class SalesWorkflow:
 
     def _should_use_llm(self, artifact: dict[str, Any]) -> bool:
         return (
-            artifact.get("intent") != "small_talk"
+            artifact.get("intent") not in {"small_talk", "follow_up"}
             and artifact.get("answer_style") != "direct_metric"
         )
 
@@ -1562,6 +1629,37 @@ class SalesWorkflow:
                 output_summary=summary,
             )
             summary_holder["summary"] = summary
+
+    async def _load_latest_context_summary(
+        self,
+        *,
+        request: SalesQuestionRequest,
+        context: InternalRequestContext,
+    ) -> str | None:
+        if request.conversation_id is None:
+            return None
+        with self.tracer.start_as_current_span("sales.load_conversation_context") as span:
+            span.set_attribute("openinference.span.kind", "RETRIEVER")
+            span.set_attribute("waro.conversation_id", str(request.conversation_id))
+            span.set_attribute("waro.tenant_id", context.tenant_id)
+            async with self.connection_factory() as connection:
+                row = await connection.fetchrow(
+                    """
+                    SELECT summary
+                    FROM ai.context_summaries
+                    WHERE conversation_id = $1
+                      AND tenant_id = $2
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    request.conversation_id,
+                    UUID(context.tenant_id),
+                )
+            value = row["summary"] if row and "summary" in row else None
+            summary = value if isinstance(value, str) else None
+            span.set_attribute("waro.conversation.context_found", bool(summary))
+            span.set_status(Status(StatusCode.OK))
+            return summary
 
     async def _finish_run(
         self,

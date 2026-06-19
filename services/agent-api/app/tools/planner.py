@@ -76,7 +76,10 @@ class ToolPlanner:
             )
         ]
 
-        if self._needs_financial_products(normalized) and "financial:read" in scopes:
+        if (
+            answer_style == "financial_analysis"
+            or self._needs_financial_products(normalized)
+        ) and "financial:read" in scopes:
             steps.append(
                 ToolPlanStep(
                     tool_name="waro.financial.products",
@@ -131,6 +134,7 @@ class ToolPlanner:
                 r"\b(productos?|platos?|margen|rentabilidad|rentables?|ingresos?|costo|cantidad|top|peor(?:es)?)\b",
                 normalized,
             )
+            or re.search(r"\b(financier[ao]s?|utilidad|ganancia|ganancias|profit)\b", normalized)
         )
 
     def _needs_menu_products(self, normalized: str) -> bool:

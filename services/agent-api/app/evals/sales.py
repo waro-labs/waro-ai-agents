@@ -2,14 +2,15 @@ from app.workflows.models import FoodCostEvalResult
 
 
 def evaluate_sales_artifact(artifact: dict) -> list[FoodCostEvalResult]:
-    if artifact.get("intent") == "small_talk":
+    if artifact.get("intent") in {"small_talk", "follow_up"}:
+        intent = artifact.get("intent")
         return [
             FoodCostEvalResult(
                 evaluator_name="sales_intent_guard",
                 score=1.0,
                 passed=True,
                 result={
-                    "intent": "small_talk",
+                    "intent": intent,
                     "tool_calls": artifact.get("tool_calls", []),
                 },
             ),
@@ -20,6 +21,9 @@ def evaluate_sales_artifact(artifact: dict) -> list[FoodCostEvalResult]:
                 result={
                     "has_sales_signal": False,
                     "handled_without_tool": True,
+                    "used_conversation_context": bool(
+                        artifact.get("previous_context_summary")
+                    ),
                 },
             ),
         ]
