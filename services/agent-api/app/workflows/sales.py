@@ -635,7 +635,7 @@ class SalesWorkflow:
             await self._record_step(
                 run_id=run_id,
                 tenant_id=context.tenant_id,
-                step_type="planner",
+                step_type="agent",
                 name="sales_tool_planner",
                 input_json={
                     "question_length": len(request.question),
