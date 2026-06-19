@@ -26,6 +26,7 @@ services:
       start_period: 20s
     networks:
       - waro_ai_internal
+      - waro_runtime
       - postgresqlwarolabs_default
 
   redis:
@@ -60,5 +61,9 @@ volumes:
 
 networks:
   waro_ai_internal:
+    internal: true
+  waro_runtime:
+    name: ${WARO_RUNTIME_NETWORK:-waro-network}
+    external: true
   postgresqlwarolabs_default:
     external: true
