@@ -20,6 +20,7 @@ from app.llm.prompts import sales_summary_messages
 from app.streaming import StreamEvent, stream_event, terminal_error_event
 from app.telemetry import current_trace_ids
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
+from app.tools.planner import ToolPlan, ToolPlanner, ToolPlanStep
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import SalesQuestionRequest, SalesWorkflowResponse
 
@@ -70,6 +71,7 @@ class SalesGraphState(TypedDict, total=False):
     input_message_id: UUID
     run_id: UUID
     sales_intent: str
+    tool_plan: dict[str, Any]
     tool_calls: list[dict[str, Any]]
     artifact: dict[str, Any]
     summary: str
@@ -96,6 +98,7 @@ class SalesWorkflow:
             connection_factory=connection_factory,
         )
         self.llm_adapter = llm_adapter or get_llm_adapter(settings)
+        self.tool_planner = ToolPlanner()
         self.tracer = trace.get_tracer(__name__)
         self.graph = self._build_graph()
 
@@ -183,11 +186,18 @@ class SalesWorkflow:
                 sales_intent = route_state.get("sales_intent", "sales_metrics")
                 span.set_attribute("waro.sales.intent", sales_intent)
                 tool_calls: list[dict[str, Any]] = []
+                tool_plan: dict[str, Any] | None = None
                 if sales_intent == "sales_metrics":
-                    async for event in self._stream_required_tools(
+                    plan = await self._plan_sales_tool_calls(
                         request=request,
                         context=context,
                         run_id=run_id,
+                    )
+                    tool_plan = plan.to_dict()
+                    async for event in self._stream_required_tools(
+                        context=context,
+                        run_id=run_id,
+                        plan=plan,
                         tool_calls=tool_calls,
                     ):
                         yield event
@@ -196,6 +206,7 @@ class SalesWorkflow:
                     request=request,
                     tool_calls=tool_calls,
                     intent=sales_intent,
+                    tool_plan=tool_plan,
                 )
                 span.set_attribute("waro.tool.call_count", len(tool_calls))
                 if self.settings.llm_provider != "disabled" and self._should_use_llm(artifact):
@@ -317,11 +328,17 @@ class SalesWorkflow:
         return "build_artifact"
 
     async def _call_sales_tools_node(self, state: SalesGraphState) -> SalesGraphState:
+        plan = await self._plan_sales_tool_calls(
+            request=state["request"],
+            context=state["context"],
+            run_id=state["run_id"],
+        )
         return {
+            "tool_plan": plan.to_dict(),
             "tool_calls": await self._call_required_tools(
-                request=state["request"],
                 context=state["context"],
                 run_id=state["run_id"],
+                plan=plan,
             )
         }
 
@@ -331,6 +348,7 @@ class SalesWorkflow:
             span.set_attribute("waro.workflow.name", self.graph_name)
             span.set_attribute("waro.run_id", str(state["run_id"]))
             tool_calls = state.get("tool_calls", [])
+            tool_plan = state.get("tool_plan")
             intent = state.get("sales_intent", "sales_metrics")
             span.set_attribute("waro.sales.intent", intent)
             span.set_attribute("waro.tool.call_count", len(tool_calls))
@@ -338,6 +356,7 @@ class SalesWorkflow:
                 request=state["request"],
                 tool_calls=tool_calls,
                 intent=intent,
+                tool_plan=tool_plan,
             )
             metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
             if metrics.get("total_sales") is not None:
@@ -496,125 +515,170 @@ class SalesWorkflow:
     async def _call_required_tools(
         self,
         *,
-        request: SalesQuestionRequest,
         context: InternalRequestContext,
         run_id: UUID,
+        plan: ToolPlan,
     ) -> list[dict[str, Any]]:
-        _, response = await self._call_sales_metrics(
-            request=request,
-            context=context,
-            run_id=run_id,
-        )
-        return [self._tool_call_record(response)]
+        records: list[dict[str, Any]] = []
+        for index, step in enumerate(plan.steps, start=1):
+            _, response = await self._call_planned_tool(
+                context=context,
+                run_id=run_id,
+                step=step,
+                index=index,
+            )
+            records.append(self._tool_call_record(response))
+        return records
 
     async def _stream_required_tools(
         self,
         *,
-        request: SalesQuestionRequest,
         context: InternalRequestContext,
         run_id: UUID,
+        plan: ToolPlan,
         tool_calls: list[dict[str, Any]],
     ) -> AsyncIterator[StreamEvent]:
-        step_id, arguments, fields = await self._prepare_sales_metrics_call(
-            request=request,
-            context=context,
-            run_id=run_id,
-        )
-        yield stream_event(
-            "tool_started",
-            run_id=run_id,
-            data={
-                "step_id": str(step_id),
-                "tool_name": "waro.sales.metrics",
-            },
-        )
-        response = await self.gateway.call(
-            request=ToolCallRequest(
+        for index, step in enumerate(plan.steps, start=1):
+            step_id = await self._record_planned_tool_step(
                 run_id=run_id,
-                step_id=step_id,
-                tool_name="waro.sales.metrics",
-                arguments=arguments,
-                fields=fields,
-                idempotency_key=f"{run_id}:1:waro.sales.metrics",
-            ),
-            context=context,
-        )
-        tool_calls.append(self._tool_call_record(response))
-        yield stream_event(
-            "tool_finished",
-            run_id=run_id,
-            data={
-                "step_id": str(step_id),
-                "tool_name": response.tool_name,
-                "status": response.status,
-                "tool_call_id": str(response.tool_call_id)
-                if response.tool_call_id
-                else None,
-                "result_summary": response.result_summary,
-                "error_type": self._stream_error_type(response.error),
-            },
-        )
+                tenant_id=context.tenant_id,
+                step=step,
+                plan=plan,
+            )
+            yield stream_event(
+                "tool_started",
+                run_id=run_id,
+                data={
+                    "step_id": str(step_id),
+                    "tool_name": step.tool_name,
+                    "reason": step.reason,
+                },
+            )
+            response = await self.gateway.call(
+                request=ToolCallRequest(
+                    run_id=run_id,
+                    step_id=step_id,
+                    tool_name=step.tool_name,
+                    arguments=step.arguments,
+                    fields=step.fields,
+                    idempotency_key=f"{run_id}:{index}:{step.tool_name}",
+                ),
+                context=context,
+            )
+            tool_calls.append(self._tool_call_record(response))
+            yield stream_event(
+                "tool_finished",
+                run_id=run_id,
+                data={
+                    "step_id": str(step_id),
+                    "tool_name": response.tool_name,
+                    "status": response.status,
+                    "tool_call_id": str(response.tool_call_id)
+                    if response.tool_call_id
+                    else None,
+                    "result_summary": response.result_summary,
+                    "error_type": self._stream_error_type(response.error),
+                },
+            )
 
-    async def _call_sales_metrics(
+    async def _call_planned_tool(
         self,
         *,
-        request: SalesQuestionRequest,
         context: InternalRequestContext,
         run_id: UUID,
+        step: ToolPlanStep,
+        index: int,
     ) -> tuple[UUID, ToolCallResponse]:
-        step_id, arguments, fields = await self._prepare_sales_metrics_call(
-            request=request,
-            context=context,
+        step_id = await self._record_planned_tool_step(
             run_id=run_id,
+            tenant_id=context.tenant_id,
+            step=step,
+            plan=None,
         )
         response = await self.gateway.call(
             request=ToolCallRequest(
                 run_id=run_id,
                 step_id=step_id,
-                tool_name="waro.sales.metrics",
-                arguments=arguments,
-                fields=fields,
-                idempotency_key=f"{run_id}:1:waro.sales.metrics",
+                tool_name=step.tool_name,
+                arguments=step.arguments,
+                fields=step.fields,
+                idempotency_key=f"{run_id}:{index}:{step.tool_name}",
             ),
             context=context,
         )
         return step_id, response
 
-    async def _prepare_sales_metrics_call(
+    async def _plan_sales_tool_calls(
         self,
         *,
         request: SalesQuestionRequest,
         context: InternalRequestContext,
         run_id: UUID,
-    ) -> tuple[UUID, dict[str, Any], list[str]]:
-        with self.tracer.start_as_current_span("sales.plan_metrics_tool") as span:
+    ) -> ToolPlan:
+        with self.tracer.start_as_current_span("sales.tool_planner") as span:
             span.set_attribute("openinference.span.kind", "CHAIN")
             span.set_attribute("waro.workflow.name", self.graph_name)
             span.set_attribute("waro.run_id", str(run_id))
             span.set_attribute("waro.tenant_id", context.tenant_id)
             period = self._resolve_period(request)
-            arguments = {
-                "date-from": period["date_from"],
-                "date-to": period["date_to"],
-            }
-            if request.group_by:
-                arguments["group-by"] = request.group_by
-            fields = ["data", "meta", "success"]
+            plan = self.tool_planner.plan_sales(
+                question=request.question,
+                period=period,
+                scopes=context.scopes,
+                group_by=request.group_by,
+            )
             span.set_attribute("waro.resolver.period.date_from", period["date_from"])
             span.set_attribute("waro.resolver.period.date_to", period["date_to"])
-            span.set_attribute("waro.sales.group_by", request.group_by or "")
-            span.set_attribute("waro.tool.name", "waro.sales.metrics")
-            span.set_attribute("waro.tool.fields", ",".join(fields))
-            step_id = await self._record_step(
+            span.set_attribute("waro.tool.plan.strategy", plan.strategy)
+            span.set_attribute("waro.tool.plan.step_count", len(plan.steps))
+            span.set_attribute("waro.tool.candidates", ",".join(plan.candidate_tools))
+            await self._record_step(
                 run_id=run_id,
                 tenant_id=context.tenant_id,
+                step_type="planner",
+                name="sales_tool_planner",
+                input_json={
+                    "question_length": len(request.question),
+                    "period": period,
+                    "available_scopes": list(context.scopes),
+                },
+                output_json=plan.to_dict(),
+                output_summary=f"Planned {len(plan.steps)} tool call(s).",
+            )
+            span.set_status(Status(StatusCode.OK))
+            return plan
+
+    async def _record_planned_tool_step(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: str,
+        step: ToolPlanStep,
+        plan: ToolPlan | None,
+    ) -> UUID:
+        with self.tracer.start_as_current_span("sales.plan_tool") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(run_id))
+            span.set_attribute("waro.tenant_id", tenant_id)
+            span.set_attribute("waro.tool.name", step.tool_name)
+            span.set_attribute("waro.tool.fields", ",".join(step.fields))
+            span.set_attribute("waro.tool.reason", step.reason)
+            step_id = await self._record_step(
+                run_id=run_id,
+                tenant_id=tenant_id,
                 step_type="tool",
-                name="waro.sales.metrics",
-                input_json={"arguments": arguments, "fields": fields},
+                name=step.tool_name,
+                input_json={
+                    "arguments": step.arguments,
+                    "fields": step.fields,
+                    "reason": step.reason,
+                    "plan": plan.to_dict() if plan else None,
+                },
             )
             span.set_attribute("waro.step_id", str(step_id))
             span.set_status(Status(StatusCode.OK))
-        return step_id, arguments, fields
+            return step_id
 
     def _tool_call_record(self, response: ToolCallResponse) -> dict[str, Any]:
         return {
@@ -632,6 +696,7 @@ class SalesWorkflow:
         request: SalesQuestionRequest,
         tool_calls: list[dict[str, Any]],
         intent: str = "sales_metrics",
+        tool_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if intent == "small_talk":
             return {
@@ -640,6 +705,7 @@ class SalesWorkflow:
                 "metrics": {},
                 "highlights": ["Small talk handled without querying sales metrics."],
                 "explanation": "Sales metrics were not queried because the message was conversational.",
+                "tool_plan": None,
                 "tool_calls": [],
             }
 
@@ -656,12 +722,15 @@ class SalesWorkflow:
             }
         )
         highlights = self._highlights(metrics)
+        auxiliary_context = self._auxiliary_context(tool_calls)
         return {
             "intent": "sales_metrics",
             "period": period,
             "metrics": metrics,
+            "auxiliary_context": auxiliary_context,
             "highlights": highlights,
             "explanation": "Sales analysis uses the WARO sales metrics tool for the requested period.",
+            "tool_plan": tool_plan,
             "tool_calls": [
                 {
                     "tool_name": call["tool_name"],
@@ -694,6 +763,7 @@ class SalesWorkflow:
                 for call in artifact.get("tool_calls", [])
                 if isinstance(call, dict)
             ],
+            "tool_plan": artifact.get("tool_plan"),
         }
 
     def _stream_error_type(self, error: Any) -> str | None:
@@ -873,6 +943,35 @@ class SalesWorkflow:
             if isinstance(result, list):
                 return [row for row in result if isinstance(row, dict)]
         return []
+
+    def _auxiliary_context(self, tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+        financial_rows = self._rows_for(tool_calls, "waro.financial.products")
+        menu_rows = self._rows_for(tool_calls, "waro.menu.products")
+        context: dict[str, Any] = {}
+        if financial_rows:
+            context["financial_products"] = [
+                {
+                    "id": row.get("id"),
+                    "name": row.get("name"),
+                    "margin": row.get("margin"),
+                    "revenue": row.get("revenue"),
+                    "cost": row.get("cost"),
+                    "quantity": row.get("quantity"),
+                }
+                for row in financial_rows[:10]
+            ]
+        if menu_rows:
+            context["menu_products"] = [
+                {
+                    "id": row.get("id"),
+                    "name": row.get("name"),
+                    "price": row.get("price"),
+                    "is_available": row.get("is_available"),
+                    "category": row.get("category"),
+                }
+                for row in menu_rows[:10]
+            ]
+        return sanitize_value(context)
 
     def _highlights(self, metrics: dict[str, Any]) -> list[str]:
         highlights = []

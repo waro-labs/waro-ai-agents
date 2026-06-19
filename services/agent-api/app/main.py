@@ -10,6 +10,7 @@ from app.dependencies.internal_auth import InternalRequestContext, require_inter
 from app.streaming import streaming_response
 from app.telemetry import configure_tracing, instrument_app
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
+from app.tools.catalog import tool_catalog
 from app.workflows.agent import AgentWorkflow
 from app.workflows.food_cost import FoodCostWorkflow
 from app.workflows.models import (
@@ -94,6 +95,13 @@ async def call_tool(
     gateway: ToolGateway = Depends(get_tool_gateway),
 ) -> ToolCallResponse:
     return await gateway.call(request=request, context=context)
+
+
+@app.get("/internal/tools/catalog", tags=["tools"])
+async def list_tool_catalog(
+    _: InternalRequestContext = Depends(require_internal_request),
+) -> dict[str, Any]:
+    return {"tools": tool_catalog()}
 
 
 @app.post(

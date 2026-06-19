@@ -114,6 +114,10 @@ class ToolSpec:
     args_model: type[ToolArgs]
     default_fields: tuple[str, ...]
     allowed_fields: frozenset[str]
+    domain: Literal["sales", "food_cost", "menu", "financial"]
+    description: str
+    tags: tuple[str, ...] = ()
+    examples: tuple[str, ...] = ()
 
 
 TOOL_SPECS: Mapping[str, ToolSpec] = {
@@ -126,6 +130,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         allowed_fields=frozenset(
             {"product_id", "product_name", "food_cost_pct", "margin_pct", "revenue", "cost"}
         ),
+        domain="food_cost",
+        description="Analyze product food cost, margin, revenue, and cost by period.",
+        tags=("food cost", "margin", "profitability", "products"),
+        examples=("productos con peor margen", "food cost del mes"),
     ),
     "waro.menu.products": ToolSpec(
         name="waro.menu.products",
@@ -136,6 +144,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         allowed_fields=frozenset(
             {"id", "name", "price", "is_available", "category", "cost", "margin"}
         ),
+        domain="menu",
+        description="List menu products and product attributes, including price and availability.",
+        tags=("menu", "products", "availability", "price"),
+        examples=("productos disponibles", "lista de productos del menu"),
     ),
     "waro.menu.recipes": ToolSpec(
         name="waro.menu.recipes",
@@ -144,6 +156,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         args_model=MenuRecipesArgs,
         default_fields=("id", "name", "is_active", "cost"),
         allowed_fields=frozenset({"id", "name", "is_active", "cost", "ingredients_count"}),
+        domain="menu",
+        description="List menu recipes and recipe cost/activity metadata.",
+        tags=("menu", "recipes", "ingredients", "cost"),
+        examples=("recetas activas", "costos de recetas"),
     ),
     "waro.sales.list": ToolSpec(
         name="waro.sales.list",
@@ -154,6 +170,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         allowed_fields=frozenset(
             {"id", "status", "total", "order_date", "payment_method", "customer_name"}
         ),
+        domain="sales",
+        description="List sales orders with status, payment method, customer, date, and total.",
+        tags=("sales", "orders", "tickets", "payment"),
+        examples=("ordenes de ayer", "ventas canceladas"),
     ),
     "waro.sales.metrics": ToolSpec(
         name="waro.sales.metrics",
@@ -175,6 +195,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
                 "payment_methods",
             }
         ),
+        domain="sales",
+        description="Compute sales metrics such as total sales, order count, average ticket, and grouped series.",
+        tags=("sales", "metrics", "revenue", "orders", "ticket", "series"),
+        examples=("ventas de ayer", "ventas por hora", "ventas del mes"),
     ),
     "waro.sales.detail": ToolSpec(
         name="waro.sales.detail",
@@ -183,6 +207,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         args_model=SalesDetailArgs,
         default_fields=("id", "status", "total", "items"),
         allowed_fields=frozenset({"id", "status", "total", "items", "order_date"}),
+        domain="sales",
+        description="Fetch details for one sales order by order id.",
+        tags=("sales", "order detail", "items"),
+        examples=("detalle de una orden"),
     ),
     "waro.financial.products": ToolSpec(
         name="waro.financial.products",
@@ -191,6 +219,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         args_model=FinancialProductsArgs,
         default_fields=("id", "name", "margin", "revenue", "cost"),
         allowed_fields=frozenset({"id", "name", "margin", "revenue", "cost", "quantity"}),
+        domain="financial",
+        description="Rank products by margin, revenue, cost, or quantity over a period.",
+        tags=("financial", "products", "margin", "revenue", "cost", "quantity"),
+        examples=("productos con peor margen", "productos por ingresos"),
     ),
 }
 

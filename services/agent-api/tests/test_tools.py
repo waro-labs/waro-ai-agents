@@ -13,8 +13,10 @@ from app.dependencies import internal_auth
 from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
 from app.tools.allowlist import coerce_args, get_tool_spec, resolve_fields
 from app.tools.audit import ToolCallAudit
+from app.tools.catalog import candidate_tools, tool_catalog
 from app.tools.gateway import ToolGateway
 from app.tools.models import ToolCallRequest
+from app.tools.planner import ToolPlanner
 from app.tools.runner import ToolRunError, ToolRunResult, WaroCliRunner
 
 
@@ -67,6 +69,46 @@ def test_sales_metrics_defaults_to_cli_envelope_fields():
         "totalOrders",
         "avgTicket",
     )
+
+
+def test_tool_catalog_exposes_auditable_tool_metadata():
+    catalog = tool_catalog()
+    sales_metrics = next(tool for tool in catalog if tool["name"] == "waro.sales.metrics")
+
+    assert sales_metrics["domain"] == "sales"
+    assert sales_metrics["scope"] == "orders:read"
+    assert "description" in sales_metrics
+    assert "arguments_schema" in sales_metrics
+    assert "data" in sales_metrics["default_fields"]
+
+
+def test_candidate_tools_rank_relevant_scoped_tools():
+    candidates = candidate_tools(
+        "dame ventas y productos con peor margen",
+        preferred_domain="sales",
+        scopes=("orders:read", "financial:read"),
+    )
+
+    assert [spec.name for spec in candidates][:2] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+    ]
+
+
+def test_sales_tool_planner_adds_financial_context_when_available():
+    plan = ToolPlanner().plan_sales(
+        question="dame ventas y productos con peor margen",
+        period={"date_from": "2026-06-01", "date_to": "2026-06-19"},
+        scopes=("orders:read", "financial:read"),
+    )
+
+    assert plan.strategy == "catalog_sales_planner_v1"
+    assert [step.tool_name for step in plan.steps] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+    ]
+    assert plan.steps[0].arguments["group-by"] == "product"
+    assert plan.steps[1].arguments == {"sort-by": "margin", "period": 19}
 
 
 def test_args_reject_extra_flags_and_build_typed_cli_args():

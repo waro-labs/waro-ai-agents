@@ -42,6 +42,27 @@ class FakeGateway:
 
     async def call(self, *, request, context):
         self.calls.append(request)
+        if request.tool_name == "waro.financial.products":
+            return ToolCallResponse(
+                tool_call_id=uuid4(),
+                tool_name=request.tool_name,
+                status="succeeded",
+                result={
+                    "data": [
+                        {
+                            "id": "p1",
+                            "name": "Burger",
+                            "margin": 0.24,
+                            "revenue": 180000,
+                            "cost": 136800,
+                            "quantity": 8,
+                        }
+                    ],
+                    "meta": {"period": request.arguments.get("period")},
+                    "success": True,
+                },
+                result_summary="Returned product financial rows.",
+            )
         return ToolCallResponse(
             tool_call_id=uuid4(),
             tool_name=request.tool_name,
@@ -223,6 +244,61 @@ async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
     )
     assert "Cuanto vendi ayer?" not in step_payloads
     assert "question_length" in step_payloads
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_plans_auxiliary_financial_tool_for_product_context():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(),
+        gateway=gateway,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-products",
+        member_id=None,
+        scopes=("orders:read", "financial:read"),
+    )
+
+    response = await workflow.run(
+        request=SalesQuestionRequest(
+            question="Dame ventas y productos con peor margen",
+            date_from="2026-06-01",
+            date_to="2026-06-19",
+        ),
+        context=context,
+    )
+
+    assert response.status == "completed"
+    assert [call.tool_name for call in gateway.calls] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+    ]
+    assert gateway.calls[0].arguments["group-by"] == "product"
+    assert gateway.calls[1].arguments == {"sort-by": "margin", "period": 19}
+    assert response.artifact["tool_plan"]["strategy"] == "catalog_sales_planner_v1"
+    assert response.artifact["tool_plan"]["steps"][1]["tool_name"] == (
+        "waro.financial.products"
+    )
+    assert response.artifact["auxiliary_context"]["financial_products"][0]["name"] == (
+        "Burger"
+    )
+
+    step_payloads = " ".join(
+        str(args)
+        for query, args in connection.fetches
+        if "INSERT INTO ai.steps" in query
+    )
+    assert "sales_tool_planner" in step_payloads
+    assert "Product financial context can explain sales performance." in step_payloads
 
 
 @pytest.mark.asyncio
