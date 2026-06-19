@@ -140,6 +140,9 @@ def test_sales_workflow_resolves_relative_periods_from_question(monkeypatch):
         SalesQuestionRequest(question="dame las ventas del mes")
     ) == {"date_from": "2026-06-01", "date_to": "2026-06-19"}
     assert workflow._resolve_period(
+        SalesQuestionRequest(question="cuales son las ventas del mes pasado?")
+    ) == {"date_from": "2026-05-01", "date_to": "2026-05-31"}
+    assert workflow._resolve_period(
         SalesQuestionRequest(question="dame las ventas de los ultimos 7 dias")
     ) == {"date_from": "2026-06-13", "date_to": "2026-06-19"}
     assert workflow._resolve_period(
@@ -178,6 +181,109 @@ def test_sales_workflow_resolves_answer_style():
         workflow._resolve_answer_style("hazme un analisis financiero del mes")
         == "financial_analysis"
     )
+
+
+@pytest.mark.asyncio
+async def test_sales_semantic_planner_guardrails_previous_month(monkeypatch):
+    monkeypatch.setattr("app.workflows.sales.datetime", FixedDateTime)
+    connection = FakeConnection()
+    llm = FakeLLMAdapter(
+        content=json.dumps(
+            {
+                "intent": "sales_metrics",
+                "date_from": "2026-06-01",
+                "date_to": "2026-06-19",
+                "group_by": None,
+                "answer_style": "direct_metric",
+                "tools": [{"name": "waro.sales.metrics", "reason": "wrong month"}],
+                "confidence": 0.9,
+                "reason": "misread current month",
+            }
+        )
+    )
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-planner",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    plan = await workflow._plan_sales_tool_calls(
+        request=SalesQuestionRequest(question="cuales son las ventas del mes pasado?"),
+        context=context,
+        run_id=uuid4(),
+    )
+
+    assert plan.steps[0].arguments == {
+        "date-from": "2026-05-01",
+        "date-to": "2026-05-31",
+    }
+    assert plan.semantic_plan
+    assert plan.semantic_plan["period_source"] == "guardrail_previous_month"
+    assert plan.semantic_plan["source"] == "guardrail_previous_month"
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_sales_semantic_planner_groups_daily_average(monkeypatch):
+    monkeypatch.setattr("app.workflows.sales.datetime", FixedDateTime)
+    connection = FakeConnection()
+    llm = FakeLLMAdapter(
+        content=json.dumps(
+            {
+                "intent": "sales_metrics",
+                "date_from": "2026-06-01",
+                "date_to": "2026-06-19",
+                "group_by": None,
+                "answer_style": "direct_metric",
+                "tools": [{"name": "waro.sales.metrics", "reason": "daily average"}],
+                "confidence": 0.8,
+                "reason": "needs daily average",
+            }
+        )
+    )
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-planner-daily",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    plan = await workflow._plan_sales_tool_calls(
+        request=SalesQuestionRequest(question="cuanto es el promedio de ventas por dia del mes"),
+        context=context,
+        run_id=uuid4(),
+    )
+
+    assert plan.steps[0].arguments == {
+        "date-from": "2026-06-01",
+        "date-to": "2026-06-19",
+        "group-by": "date",
+    }
+    assert plan.semantic_plan
+    assert plan.semantic_plan["group_by"] == "date"
 
 
 def test_sales_workflow_keeps_explicit_dates_ahead_of_question(monkeypatch):
@@ -398,10 +504,11 @@ async def test_sales_workflow_uses_llm_summary_when_enabled():
     )
 
     assert response.summary == "Ayer vendiste $431.500 con ticket promedio de $30.821."
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2
     assert llm.calls[0][0].role == "system"
-    assert "analista senior de ventas" in llm.calls[0][0].content
-    assert "answer_style" in llm.calls[0][1].content
+    assert "planner semantico" in llm.calls[0][0].content
+    assert "analista senior de ventas" in llm.calls[1][0].content
+    assert "answer_style" in llm.calls[1][1].content
     fetched_sql = "\n".join(query for query, _ in connection.fetches)
     assert "sales_summary" in str(connection.fetches)
     assert "INSERT INTO ai.steps" in fetched_sql
@@ -566,4 +673,5 @@ async def test_sales_workflow_streams_llm_token_events_before_final_payload():
     ]
     assert all("content" not in payload for payload in token_payloads)
     assert parse_sse_frame(events[-1].to_sse())[1]["summary"] == "Ayer vendiste $431.500."
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2
+    assert "planner semantico" in llm.calls[0][0].content

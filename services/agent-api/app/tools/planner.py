@@ -26,12 +26,14 @@ class ToolPlan:
     strategy: str
     candidate_tools: list[str]
     steps: list[ToolPlanStep] = field(default_factory=list)
+    semantic_plan: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "strategy": self.strategy,
             "candidate_tools": self.candidate_tools,
             "steps": [step.to_dict() for step in self.steps],
+            "semantic_plan": self.semantic_plan,
         }
 
 
@@ -45,6 +47,8 @@ class ToolPlanner:
         period: dict[str, str],
         scopes: tuple[str, ...],
         group_by: str | None = None,
+        answer_style: str | None = None,
+        semantic_plan: dict[str, Any] | None = None,
     ) -> ToolPlan:
         normalized = normalize_query(question)
         candidates = candidate_tools(
@@ -99,6 +103,12 @@ class ToolPlanner:
             strategy="catalog_sales_planner_v1",
             candidate_tools=candidate_names,
             steps=steps,
+            semantic_plan={
+                **(semantic_plan or {}),
+                "period": period,
+                "group_by": metrics_group_by,
+                "answer_style": answer_style,
+            },
         )
 
     def _infer_sales_group_by(self, normalized: str) -> str | None:

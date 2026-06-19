@@ -16,10 +16,11 @@ from app.database import get_db_connection
 from app.dependencies.internal_auth import InternalRequestContext
 from app.evals.sales import evaluate_sales_artifact
 from app.llm import LLMAdapter, get_llm_adapter
-from app.llm.prompts import sales_summary_messages
+from app.llm.prompts import sales_planner_messages, sales_summary_messages
 from app.streaming import StreamEvent, stream_event, terminal_error_event
 from app.telemetry import current_trace_ids
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
+from app.tools.catalog import tool_catalog
 from app.tools.planner import ToolPlan, ToolPlanner, ToolPlanStep
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import SalesQuestionRequest, SalesWorkflowResponse
@@ -629,16 +630,31 @@ class SalesWorkflow:
             span.set_attribute("waro.workflow.name", self.graph_name)
             span.set_attribute("waro.run_id", str(run_id))
             span.set_attribute("waro.tenant_id", context.tenant_id)
-            period = self._resolve_period(request)
+            semantic_plan = await self._resolve_semantic_sales_plan(
+                request=request,
+                context=context,
+                run_id=run_id,
+            )
+            period = semantic_plan["period"]
+            group_by = request.group_by or semantic_plan.get("group_by")
+            answer_style = str(
+                semantic_plan.get("answer_style")
+                or self._resolve_answer_style(request.question)
+            )
             plan = self.tool_planner.plan_sales(
                 question=request.question,
                 period=period,
                 scopes=context.scopes,
-                group_by=request.group_by,
+                group_by=group_by if isinstance(group_by, str) else None,
+                answer_style=answer_style,
+                semantic_plan=semantic_plan,
             )
-            answer_style = self._resolve_answer_style(request.question)
             span.set_attribute("waro.resolver.period.date_from", period["date_from"])
             span.set_attribute("waro.resolver.period.date_to", period["date_to"])
+            span.set_attribute("waro.resolver.source", str(semantic_plan.get("source", "")))
+            span.set_attribute("waro.resolver.confidence", float(semantic_plan.get("confidence", 0)))
+            if group_by:
+                span.set_attribute("waro.resolver.group_by", str(group_by))
             span.set_attribute("waro.answer.style", answer_style)
             span.set_attribute("waro.tool.plan.strategy", plan.strategy)
             span.set_attribute("waro.tool.plan.step_count", len(plan.steps))
@@ -653,12 +669,125 @@ class SalesWorkflow:
                     "period": period,
                     "available_scopes": list(context.scopes),
                     "answer_style": answer_style,
+                    "semantic_plan": semantic_plan,
                 },
                 output_json=plan.to_dict(),
                 output_summary=f"Planned {len(plan.steps)} tool call(s).",
             )
             span.set_status(Status(StatusCode.OK))
             return plan
+
+    async def _resolve_semantic_sales_plan(
+        self,
+        *,
+        request: SalesQuestionRequest,
+        context: InternalRequestContext,
+        run_id: UUID,
+    ) -> dict[str, Any]:
+        fallback = self._fallback_semantic_sales_plan(request)
+        if self.settings.llm_provider == "disabled":
+            return fallback
+
+        today = datetime.now(ZoneInfo("America/Bogota")).date()
+        with self.tracer.start_as_current_span("llm.sales.planner") as span:
+            span.set_attribute("openinference.span.kind", "LLM")
+            span.set_attribute("llm.provider", self.llm_adapter.provider)
+            span.set_attribute("waro.run_id", str(run_id))
+            span.set_attribute("waro.tenant_id", context.tenant_id)
+            span.set_attribute("waro.request.question_length", len(request.question))
+            if self.settings.llm_provider == "kimi":
+                span.set_attribute("llm.model", self.settings.kimi_model)
+                span.set_attribute("llm.model_name", self.settings.kimi_model)
+
+            try:
+                response = await self.llm_adapter.complete(
+                    messages=sales_planner_messages(
+                        question=request.question,
+                        today=today.isoformat(),
+                        timezone="America/Bogota",
+                        tool_catalog=tool_catalog(),
+                    ),
+                    temperature=0,
+                )
+                raw_plan = self._parse_planner_json(response.content)
+                validated = self._validate_semantic_sales_plan(
+                    raw_plan,
+                    request=request,
+                    fallback=fallback,
+                    today=today,
+                )
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                await self._record_step(
+                    run_id=run_id,
+                    tenant_id=context.tenant_id,
+                    step_type="llm",
+                    name="sales_semantic_planner",
+                    input_json={
+                        "provider": self.settings.llm_provider,
+                        "model": self.settings.kimi_model
+                        if self.settings.llm_provider == "kimi"
+                        else None,
+                    },
+                    output_json={
+                        "fallback": True,
+                        "error_type": type(exc).__name__,
+                        "semantic_plan": fallback,
+                    },
+                    output_summary="Semantic planner fell back to deterministic resolver.",
+                )
+                return fallback
+
+            span.set_attribute("llm.model", response.model)
+            span.set_attribute("llm.model_name", response.model)
+            span.set_attribute("llm.response.provider", response.provider)
+            if response.input_tokens is not None:
+                span.set_attribute("llm.usage.prompt_tokens", response.input_tokens)
+                span.set_attribute("llm.token_count.prompt", response.input_tokens)
+            if response.output_tokens is not None:
+                span.set_attribute("llm.usage.completion_tokens", response.output_tokens)
+                span.set_attribute("llm.token_count.completion", response.output_tokens)
+            if response.total_tokens is not None:
+                span.set_attribute("llm.usage.total_tokens", response.total_tokens)
+                span.set_attribute("llm.token_count.total", response.total_tokens)
+            if response.estimated_cost_usd is not None:
+                span.set_attribute("llm.cost.estimated_usd", response.estimated_cost_usd)
+                span.set_attribute("llm.cost.total", response.estimated_cost_usd)
+            span.set_attribute("llm.cost.source", response.cost_source)
+            span.set_attribute("waro.resolver.source", str(validated.get("source", "")))
+            span.set_attribute("waro.resolver.confidence", float(validated.get("confidence", 0)))
+            span.set_attribute("waro.answer.style", str(validated.get("answer_style", "")))
+            span.set_status(Status(StatusCode.OK))
+            await self._record_step(
+                run_id=run_id,
+                tenant_id=context.tenant_id,
+                step_type="llm",
+                name="sales_semantic_planner",
+                input_json={
+                    "provider": response.provider,
+                    "model": response.model,
+                    "message_count": 2,
+                },
+                output_json={
+                    "fallback": validated.get("source") != "llm_structured",
+                    "semantic_plan": validated,
+                    "llm_usage": {
+                        "input_count": response.input_tokens,
+                        "output_count": response.output_tokens,
+                        "total_count": response.total_tokens,
+                    },
+                    "llm_cost": {
+                        "estimated_cost_usd": response.estimated_cost_usd,
+                        "source": response.cost_source,
+                    },
+                },
+                output_summary=(
+                    f"Resolved {validated['period']['date_from']} to "
+                    f"{validated['period']['date_to']} as {validated.get('answer_style')}."
+                ),
+            )
+            return validated
 
     async def _record_planned_tool_step(
         self,
@@ -722,8 +851,17 @@ class SalesWorkflow:
                 "tool_calls": [],
             }
 
-        period = self._resolve_period(request)
-        answer_style = self._resolve_answer_style(request.question)
+        semantic_plan = self._semantic_plan_from_tool_plan(tool_plan)
+        period = (
+            semantic_plan.get("period")
+            if isinstance(semantic_plan.get("period"), dict)
+            else self._resolve_period(request)
+        )
+        answer_style = (
+            str(semantic_plan.get("answer_style"))
+            if semantic_plan.get("answer_style")
+            else self._resolve_answer_style(request.question)
+        )
         metric_data = self._metrics_data_for(tool_calls, "waro.sales.metrics")
         metrics = sanitize_value(
             {
@@ -745,6 +883,7 @@ class SalesWorkflow:
             "auxiliary_context": auxiliary_context,
             "highlights": highlights,
             "explanation": "Sales analysis uses the WARO sales metrics tool for the requested period.",
+            "semantic_plan": semantic_plan,
             "tool_plan": tool_plan,
             "tool_calls": [
                 {
@@ -780,6 +919,7 @@ class SalesWorkflow:
                 if isinstance(call, dict)
             ],
             "tool_plan": artifact.get("tool_plan"),
+            "semantic_plan": artifact.get("semantic_plan"),
         }
 
     def _stream_error_type(self, error: Any) -> str | None:
@@ -795,6 +935,116 @@ class SalesWorkflow:
         if self._is_small_talk(normalized) and not self._has_sales_signal(normalized):
             return "small_talk"
         return "sales_metrics"
+
+    def _fallback_semantic_sales_plan(self, request: SalesQuestionRequest) -> dict[str, Any]:
+        period = self._resolve_period(request)
+        normalized = self._normalize_question(request.question)
+        group_by = request.group_by
+        if group_by is None and self._needs_daily_breakdown(normalized):
+            group_by = "date"
+        return {
+            "intent": self._resolve_sales_intent(request.question),
+            "period": period,
+            "group_by": group_by,
+            "answer_style": self._resolve_answer_style(request.question),
+            "tools": [{"name": "waro.sales.metrics", "reason": "fallback_default"}],
+            "confidence": 0.55,
+            "reason": "deterministic_fallback",
+            "source": "deterministic_fallback",
+        }
+
+    def _parse_planner_json(self, content: str) -> dict[str, Any]:
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError("Planner response must be a JSON object.")
+        return parsed
+
+    def _validate_semantic_sales_plan(
+        self,
+        plan: dict[str, Any],
+        *,
+        request: SalesQuestionRequest,
+        fallback: dict[str, Any],
+        today: date,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_question(request.question)
+        allowed_styles = {"direct_metric", "business_analysis", "financial_analysis", "diagnostic"}
+        allowed_groups = {"date", "weekday", "hour", "product", "payment", "ticket"}
+        intent = plan.get("intent") if plan.get("intent") in {"small_talk", "sales_metrics"} else fallback["intent"]
+        answer_style = (
+            plan.get("answer_style")
+            if plan.get("answer_style") in allowed_styles
+            else fallback["answer_style"]
+        )
+        if self._resolve_answer_style(request.question) == "direct_metric":
+            answer_style = "direct_metric"
+
+        period = self._period_from_planner(plan, fallback=fallback)
+        period_source = "llm"
+        if request.date_from and request.date_to:
+            period = {"date_from": request.date_from, "date_to": request.date_to}
+            period_source = "request_override"
+        elif re.search(r"\bmes\s+pasad[oa]\b", normalized):
+            period = self._previous_month_period(today)
+            period_source = "guardrail_previous_month"
+        elif period is fallback["period"]:
+            period_source = "fallback"
+
+        group_by = plan.get("group_by")
+        if group_by not in allowed_groups:
+            group_by = fallback.get("group_by")
+        if request.group_by:
+            group_by = request.group_by
+        elif self._needs_daily_breakdown(normalized):
+            group_by = "date"
+
+        confidence = plan.get("confidence")
+        if not isinstance(confidence, int | float):
+            confidence = fallback.get("confidence", 0.55)
+        confidence = max(0.0, min(1.0, float(confidence)))
+        tools = plan.get("tools") if isinstance(plan.get("tools"), list) else fallback["tools"]
+        return {
+            "intent": intent,
+            "period": period,
+            "group_by": group_by,
+            "answer_style": answer_style,
+            "tools": sanitize_value(tools),
+            "confidence": confidence,
+            "reason": str(plan.get("reason") or fallback["reason"])[:300],
+            "source": "llm_structured" if period_source == "llm" else period_source,
+            "period_source": period_source,
+        }
+
+    def _period_from_planner(
+        self,
+        plan: dict[str, Any],
+        *,
+        fallback: dict[str, Any],
+    ) -> dict[str, str]:
+        date_from = plan.get("date_from")
+        date_to = plan.get("date_to")
+        if not isinstance(date_from, str) or not isinstance(date_to, str):
+            return fallback["period"]
+        try:
+            start = date.fromisoformat(date_from)
+            end = date.fromisoformat(date_to)
+        except ValueError:
+            return fallback["period"]
+        if start > end:
+            return fallback["period"]
+        return {"date_from": start.isoformat(), "date_to": end.isoformat()}
+
+    def _semantic_plan_from_tool_plan(self, tool_plan: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(tool_plan, dict):
+            return {}
+        semantic_plan = tool_plan.get("semantic_plan")
+        if isinstance(semantic_plan, dict):
+            return semantic_plan
+        return {}
 
     def _resolve_answer_style(self, question: str) -> AnswerStyle:
         normalized = self._normalize_question(question)
@@ -854,6 +1104,8 @@ class SalesWorkflow:
         if re.search(r"\bayer\b", normalized):
             value = (today - timedelta(days=1)).isoformat()
             return {"date_from": value, "date_to": value}
+        if re.search(r"\bmes\s+pasad[oa]\b", normalized):
+            return self._previous_month_period(today)
         if re.search(r"\b(este mes|del mes|mes actual|month to date|mtd)\b", normalized):
             start = today.replace(day=1)
             return {"date_from": start.isoformat(), "date_to": today.isoformat()}
@@ -865,6 +1117,24 @@ class SalesWorkflow:
             start = today - timedelta(days=last_days - 1)
             return {"date_from": start.isoformat(), "date_to": today.isoformat()}
         return None
+
+    def _previous_month_period(self, today: date) -> dict[str, str]:
+        first_this_month = today.replace(day=1)
+        last_previous_month = first_this_month - timedelta(days=1)
+        first_previous_month = last_previous_month.replace(day=1)
+        return {
+            "date_from": first_previous_month.isoformat(),
+            "date_to": last_previous_month.isoformat(),
+        }
+
+    def _needs_daily_breakdown(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(promedio\s+(?:de\s+)?ventas?\s+por\s+dia|por\s+dia|"
+                r"dia\s+a\s+dia|diari[ao]|tendencia\s+diaria)\b",
+                normalized,
+            )
+        )
 
     def _last_days_count(self, normalized: str) -> int | None:
         match = re.search(
