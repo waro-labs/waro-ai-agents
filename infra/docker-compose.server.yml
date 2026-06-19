@@ -60,6 +60,7 @@ services:
       PHOENIX_ROOT_URL: ${PHOENIX_ROOT_URL:-https://phoenix.warocol.com}
       PHOENIX_CSRF_TRUSTED_ORIGINS: ${PHOENIX_CSRF_TRUSTED_ORIGINS:-https://phoenix.warocol.com}
       PHOENIX_SQL_DATABASE_URL: ${PHOENIX_SQL_DATABASE_URL:-sqlite:////data/phoenix.db}
+      PHOENIX_ALLOW_EXTERNAL_RESOURCES: ${PHOENIX_ALLOW_EXTERNAL_RESOURCES:-false}
     ports:
       - "127.0.0.1:6006:6006"
       - "127.0.0.1:4317:4317"
@@ -67,6 +68,7 @@ services:
       - phoenix-data:/data
     networks:
       - waro_ai_internal
+      - waro_runtime
 
 volumes:
   redis-data:
