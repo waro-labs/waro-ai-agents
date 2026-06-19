@@ -169,6 +169,17 @@ def test_sales_workflow_routes_small_talk_without_sales_tool():
     assert workflow._resolve_sales_intent("dime las ventas de los ultimos 15 dias") == "sales_metrics"
 
 
+def test_sales_workflow_resolves_answer_style():
+    workflow = SalesWorkflow(settings=Settings())
+
+    assert workflow._resolve_answer_style("cuales son las ventas de ayer") == "direct_metric"
+    assert workflow._resolve_answer_style("analiza las ventas del mes") == "business_analysis"
+    assert (
+        workflow._resolve_answer_style("hazme un analisis financiero del mes")
+        == "financial_analysis"
+    )
+
+
 def test_sales_workflow_keeps_explicit_dates_ahead_of_question(monkeypatch):
     monkeypatch.setattr("app.workflows.sales.datetime", FixedDateTime)
     workflow = SalesWorkflow(settings=Settings())
@@ -224,6 +235,11 @@ async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
     assert response.artifact["metrics"]["total_sales"] == 431500.0
     assert response.artifact["metrics"]["order_count"] == 14
     assert response.artifact["metrics"]["avg_ticket"] == 30821.428571428572
+    assert response.artifact["answer_style"] == "direct_metric"
+    assert response.summary == (
+        "El 2026-06-17: vendiste $431.500 en 14 ordenes. "
+        "Ticket promedio: $30.821."
+    )
     assert "question" not in response.artifact
     assert response.evals[0].evaluator_name == "sales_tool_usage"
     assert all(eval_result.passed for eval_result in response.evals)
@@ -374,7 +390,7 @@ async def test_sales_workflow_uses_llm_summary_when_enabled():
 
     response = await workflow.run(
         request=SalesQuestionRequest(
-            question="Cuanto vendi ayer?",
+            question="Analiza cuanto vendi ayer?",
             date_from="2026-06-17",
             date_to="2026-06-17",
         ),
@@ -385,6 +401,7 @@ async def test_sales_workflow_uses_llm_summary_when_enabled():
     assert len(llm.calls) == 1
     assert llm.calls[0][0].role == "system"
     assert "analista senior de ventas" in llm.calls[0][0].content
+    assert "answer_style" in llm.calls[0][1].content
     fetched_sql = "\n".join(query for query, _ in connection.fetches)
     assert "sales_summary" in str(connection.fetches)
     assert "INSERT INTO ai.steps" in fetched_sql
@@ -431,7 +448,6 @@ async def test_sales_workflow_streams_event_order_and_final_payload():
         "step_started",
         "tool_started",
         "tool_finished",
-        "llm_started",
         "final",
     ]
     assert [call.tool_name for call in gateway.calls] == ["waro.sales.metrics"]
@@ -439,7 +455,11 @@ async def test_sales_workflow_streams_event_order_and_final_payload():
     final_event_name, final_payload = parse_sse_frame(events[-1].to_sse())
     assert final_event_name == "final"
     assert final_payload["status"] == "completed"
-    assert final_payload["summary"] == "Ayer vendiste $431.500 con ticket promedio de $30.821."
+    assert final_payload["summary"] == (
+        "El 2026-06-17: vendiste $431.500 en 14 ordenes. "
+        "Ticket promedio: $30.821."
+    )
+    assert final_payload["artifact_summary"]["answer_style"] == "direct_metric"
     assert final_payload["artifact_summary"]["metrics"] == {
         "total_sales": 431500.0,
         "order_count": 14,
@@ -524,7 +544,7 @@ async def test_sales_workflow_streams_llm_token_events_before_final_payload():
     events = [
         event
         async for event in workflow.stream(
-            request=SalesQuestionRequest(question="Cuanto vendi ayer?"),
+            request=SalesQuestionRequest(question="Analiza cuanto vendi ayer?"),
             context=context,
         )
     ]

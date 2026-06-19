@@ -63,6 +63,13 @@ SPANISH_NUMBER_WORDS = {
     "treinta": 30,
 }
 
+AnswerStyle = Literal[
+    "direct_metric",
+    "business_analysis",
+    "financial_analysis",
+    "diagnostic",
+]
+
 
 class SalesGraphState(TypedDict, total=False):
     request: SalesQuestionRequest
@@ -208,6 +215,7 @@ class SalesWorkflow:
                     intent=sales_intent,
                     tool_plan=tool_plan,
                 )
+                span.set_attribute("waro.answer.style", artifact.get("answer_style", ""))
                 span.set_attribute("waro.tool.call_count", len(tool_calls))
                 if self.settings.llm_provider != "disabled" and self._should_use_llm(artifact):
                     yield stream_event(
@@ -358,6 +366,7 @@ class SalesWorkflow:
                 intent=intent,
                 tool_plan=tool_plan,
             )
+            span.set_attribute("waro.answer.style", artifact.get("answer_style", ""))
             metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
             if metrics.get("total_sales") is not None:
                 span.set_attribute("waro.sales.total_sales", metrics["total_sales"])
@@ -627,8 +636,10 @@ class SalesWorkflow:
                 scopes=context.scopes,
                 group_by=request.group_by,
             )
+            answer_style = self._resolve_answer_style(request.question)
             span.set_attribute("waro.resolver.period.date_from", period["date_from"])
             span.set_attribute("waro.resolver.period.date_to", period["date_to"])
+            span.set_attribute("waro.answer.style", answer_style)
             span.set_attribute("waro.tool.plan.strategy", plan.strategy)
             span.set_attribute("waro.tool.plan.step_count", len(plan.steps))
             span.set_attribute("waro.tool.candidates", ",".join(plan.candidate_tools))
@@ -641,6 +652,7 @@ class SalesWorkflow:
                     "question_length": len(request.question),
                     "period": period,
                     "available_scopes": list(context.scopes),
+                    "answer_style": answer_style,
                 },
                 output_json=plan.to_dict(),
                 output_summary=f"Planned {len(plan.steps)} tool call(s).",
@@ -701,6 +713,7 @@ class SalesWorkflow:
         if intent == "small_talk":
             return {
                 "intent": "small_talk",
+                "answer_style": "small_talk",
                 "period": None,
                 "metrics": {},
                 "highlights": ["Small talk handled without querying sales metrics."],
@@ -710,6 +723,7 @@ class SalesWorkflow:
             }
 
         period = self._resolve_period(request)
+        answer_style = self._resolve_answer_style(request.question)
         metric_data = self._metrics_data_for(tool_calls, "waro.sales.metrics")
         metrics = sanitize_value(
             {
@@ -725,6 +739,7 @@ class SalesWorkflow:
         auxiliary_context = self._auxiliary_context(tool_calls)
         return {
             "intent": "sales_metrics",
+            "answer_style": answer_style,
             "period": period,
             "metrics": metrics,
             "auxiliary_context": auxiliary_context,
@@ -747,6 +762,7 @@ class SalesWorkflow:
         metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
         return {
             "intent": artifact.get("intent"),
+            "answer_style": artifact.get("answer_style"),
             "period": artifact.get("period"),
             "metrics": {
                 "total_sales": metrics.get("total_sales"),
@@ -779,6 +795,27 @@ class SalesWorkflow:
         if self._is_small_talk(normalized) and not self._has_sales_signal(normalized):
             return "small_talk"
         return "sales_metrics"
+
+    def _resolve_answer_style(self, question: str) -> AnswerStyle:
+        normalized = self._normalize_question(question)
+        if re.search(
+            r"\b(analisis financiero|financiero|rentabilidad|margen|margenes|"
+            r"costos?|utilidad|profit)\b",
+            normalized,
+        ):
+            return "financial_analysis"
+        if re.search(
+            r"\b(analiza|analisis|explica|explicame|detalle|detallado|"
+            r"como vamos|que significa|recomendaciones?|acciones?)\b",
+            normalized,
+        ):
+            return "business_analysis"
+        if re.search(
+            r"\b(error|problema|fall[ao]|no hay datos|revisar|diagnostico)\b",
+            normalized,
+        ):
+            return "diagnostic"
+        return "direct_metric"
 
     def _is_small_talk(self, normalized: str) -> bool:
         return any(re.search(pattern, normalized) for pattern in SMALL_TALK_PATTERNS)
@@ -990,8 +1027,24 @@ class SalesWorkflow:
                 "dame las ventas de ayer o dime las ventas de los ultimos 15 dias."
             )
         metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
+        answer_style = artifact.get("answer_style")
         total_sales = metrics.get("total_sales")
+        order_count = metrics.get("order_count")
         avg_ticket = metrics.get("avg_ticket")
+        if answer_style == "direct_metric":
+            period = artifact.get("period") if isinstance(artifact.get("period"), dict) else {}
+            label = self._period_label(period)
+            if total_sales is None and order_count is None and avg_ticket is None:
+                return f"{label}: no encontre metricas de ventas para ese periodo."
+            parts = []
+            if total_sales is not None:
+                parts.append(f"vendiste {self._format_cop(total_sales)}")
+            if order_count is not None:
+                parts.append(f"en {int(order_count)} ordenes")
+            summary = f"{label}: " + " ".join(parts) + "."
+            if avg_ticket is not None:
+                summary += f" Ticket promedio: {self._format_cop(avg_ticket)}."
+            return summary
         if total_sales is None and avg_ticket is None:
             return "Sales workflow completed without returned sales metrics."
         parts = []
@@ -1002,7 +1055,26 @@ class SalesWorkflow:
         return "Sales workflow completed with " + " and ".join(parts) + "."
 
     def _should_use_llm(self, artifact: dict[str, Any]) -> bool:
-        return artifact.get("intent") != "small_talk"
+        return (
+            artifact.get("intent") != "small_talk"
+            and artifact.get("answer_style") != "direct_metric"
+        )
+
+    def _format_cop(self, value: Any) -> str:
+        try:
+            numeric = round(float(value))
+        except (TypeError, ValueError):
+            return str(value)
+        return "$" + f"{numeric:,}".replace(",", ".")
+
+    def _period_label(self, period: dict[str, Any]) -> str:
+        date_from = period.get("date_from")
+        date_to = period.get("date_to")
+        if not date_from and not date_to:
+            return "Periodo consultado"
+        if date_from == date_to:
+            return f"El {date_from}"
+        return f"Del {date_from} al {date_to}"
 
     async def _build_summary_with_llm(
         self,
@@ -1020,6 +1092,7 @@ class SalesWorkflow:
             span.set_attribute("llm.provider", self.llm_adapter.provider)
             span.set_attribute("waro.run_id", str(run_id))
             span.set_attribute("waro.tenant_id", context.tenant_id)
+            span.set_attribute("waro.answer.style", artifact.get("answer_style", ""))
             if self.settings.llm_provider == "kimi":
                 span.set_attribute("llm.model", self.settings.kimi_model)
                 span.set_attribute("llm.model_name", self.settings.kimi_model)
@@ -1079,6 +1152,7 @@ class SalesWorkflow:
                     "provider": response.provider,
                     "model": response.model,
                     "message_count": 2,
+                    "answer_style": artifact.get("answer_style"),
                 },
                 output_json={
                     "fallback": summary == fallback_summary,
@@ -1123,6 +1197,7 @@ class SalesWorkflow:
             span.set_attribute("llm.provider", self.llm_adapter.provider)
             span.set_attribute("waro.run_id", str(run_id))
             span.set_attribute("waro.tenant_id", context.tenant_id)
+            span.set_attribute("waro.answer.style", artifact.get("answer_style", ""))
             if self.settings.llm_provider == "kimi":
                 span.set_attribute("llm.model", self.settings.kimi_model)
                 span.set_attribute("llm.model_name", self.settings.kimi_model)
@@ -1200,6 +1275,7 @@ class SalesWorkflow:
                     "provider": response.provider,
                     "model": response.model,
                     "message_count": 2,
+                    "answer_style": artifact.get("answer_style"),
                 },
                 output_json={
                     "fallback": summary == fallback_summary,
