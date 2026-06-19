@@ -3,6 +3,7 @@ set -euo pipefail
 
 ENV_FILE="${1:-.env}"
 ROOT_URL="${PHOENIX_ROOT_URL:-https://phoenix.warocol.com}"
+PHOENIX_DB_NAME="${PHOENIX_DB_NAME:-phoenix}"
 
 if ! command -v openssl >/dev/null 2>&1; then
   echo "openssl is required to generate Phoenix secrets." >&2
@@ -20,6 +21,34 @@ random_hex() {
 
 random_password() {
   printf 'Aa1!%s' "$(openssl rand -base64 24 | tr -d '\n' | tr '/+' '_-' | cut -c1-24)"
+}
+
+env_value() {
+  local key="$1"
+  local value="${!key:-}"
+  if [[ -z "$value" && -f "$ENV_FILE" ]]; then
+    value="$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
+  fi
+  printf '%s' "$value"
+}
+
+derive_phoenix_database_url() {
+  local base_url
+  base_url="$(env_value "DATABASE_URL")"
+  if [[ -z "$base_url" ]]; then
+    echo "DATABASE_URL must be set before deriving PHOENIX_SQL_DATABASE_URL." >&2
+    exit 1
+  fi
+  python3 - "$base_url" "$PHOENIX_DB_NAME" <<'PY'
+from urllib.parse import urlsplit, urlunsplit
+import sys
+
+base_url, db_name = sys.argv[1], sys.argv[2]
+parts = urlsplit(base_url)
+if parts.scheme not in {"postgresql", "postgres"} or not parts.netloc:
+    raise SystemExit("DATABASE_URL must be a PostgreSQL URL.")
+print(urlunsplit((parts.scheme, parts.netloc, "/" + db_name, parts.query, parts.fragment)))
+PY
 }
 
 upsert_env() {
@@ -43,6 +72,7 @@ upsert_env() {
 phoenix_secret="$(random_hex)"
 phoenix_admin_secret="$(random_hex)"
 phoenix_admin_password="$(random_password)"
+phoenix_database_url="${PHOENIX_SQL_DATABASE_URL:-$(derive_phoenix_database_url)}"
 
 while [[ "$phoenix_admin_secret" == "$phoenix_secret" ]]; do
   phoenix_admin_secret="$(random_hex)"
@@ -56,7 +86,7 @@ upsert_env "PHOENIX_ENABLE_STRONG_PASSWORD_POLICY" "true"
 upsert_env "PHOENIX_USE_SECURE_COOKIES" "true"
 upsert_env "PHOENIX_ROOT_URL" "$ROOT_URL"
 upsert_env "PHOENIX_CSRF_TRUSTED_ORIGINS" "$ROOT_URL"
-upsert_env "PHOENIX_SQL_DATABASE_URL" "sqlite:////data/phoenix.db"
+upsert_env "PHOENIX_SQL_DATABASE_URL" "$phoenix_database_url"
 upsert_env "OTEL_ENABLED" "true"
 upsert_env "PHOENIX_COLLECTOR_ENDPOINT" "http://phoenix:6006/v1/traces"
 upsert_env "PHOENIX_COLLECTOR_PROTOCOL" "http/protobuf"

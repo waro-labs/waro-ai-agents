@@ -59,7 +59,7 @@ services:
       PHOENIX_USE_SECURE_COOKIES: ${PHOENIX_USE_SECURE_COOKIES:-true}
       PHOENIX_ROOT_URL: ${PHOENIX_ROOT_URL:-https://phoenix.warocol.com}
       PHOENIX_CSRF_TRUSTED_ORIGINS: ${PHOENIX_CSRF_TRUSTED_ORIGINS:-https://phoenix.warocol.com}
-      PHOENIX_SQL_DATABASE_URL: ${PHOENIX_SQL_DATABASE_URL:-sqlite:////data/phoenix.db}
+      PHOENIX_SQL_DATABASE_URL: ${PHOENIX_SQL_DATABASE_URL:?PHOENIX_SQL_DATABASE_URL is required}
       PHOENIX_ALLOW_EXTERNAL_RESOURCES: ${PHOENIX_ALLOW_EXTERNAL_RESOURCES:-false}
     ports:
       - "127.0.0.1:6006:6006"
@@ -69,6 +69,7 @@ services:
     networks:
       - waro_ai_internal
       - waro_runtime
+      - postgresqlwarolabs_default
 
 volumes:
   redis-data:
