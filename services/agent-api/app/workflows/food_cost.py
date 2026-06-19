@@ -218,7 +218,7 @@ class FoodCostWorkflow:
             tenant_id=state["context"].tenant_id,
             step_type="router",
             name="food_cost_intent_router",
-            input_json={"question": state["request"].question},
+            input_json={"question_length": len(state["request"].question)},
             output_json={"intent": "food_cost"},
             output_summary="Routed request to the food-cost workflow.",
         )
@@ -572,7 +572,6 @@ class FoodCostWorkflow:
             ]
 
         return {
-            "question": request.question,
             "period": {
                 "date_from": request.date_from,
                 "date_to": request.date_to,

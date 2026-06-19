@@ -145,6 +145,7 @@ async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
     assert response.artifact["metrics"]["total_sales"] == 431500.0
     assert response.artifact["metrics"]["order_count"] == 14
     assert response.artifact["metrics"]["avg_ticket"] == 30821.428571428572
+    assert "question" not in response.artifact
     assert response.evals[0].evaluator_name == "sales_tool_usage"
     assert all(eval_result.passed for eval_result in response.evals)
 
@@ -157,6 +158,13 @@ async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
     assert "INSERT INTO ai.context_summaries" in executed_sql
     assert executed_sql.count("INSERT INTO ai.eval_results") == 2
     assert "status = 'completed'" in executed_sql
+    step_payloads = " ".join(
+        str(args)
+        for query, args in connection.fetches
+        if "INSERT INTO ai.steps" in query
+    )
+    assert "Cuanto vendi ayer?" not in step_payloads
+    assert "question_length" in step_payloads
 
 
 @pytest.mark.asyncio
