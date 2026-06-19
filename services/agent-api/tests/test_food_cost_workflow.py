@@ -165,6 +165,7 @@ async def test_food_cost_workflow_persists_run_tools_message_summary_and_evals()
     }
     assert response.artifact["low_margin_products"][0]["name"] == "Arepa"
     assert response.artifact["recommendations"]
+    assert "question" not in response.artifact
     assert {eval_result.evaluator_name for eval_result in response.evals} == {
         "food_cost_tool_usage",
         "food_cost_safety",
@@ -181,6 +182,13 @@ async def test_food_cost_workflow_persists_run_tools_message_summary_and_evals()
     assert "INSERT INTO ai.context_summaries" in executed_sql
     assert executed_sql.count("INSERT INTO ai.eval_results") == 3
     assert "status = 'completed'" in executed_sql
+    step_payloads = " ".join(
+        str(args)
+        for query, args in connection.fetches
+        if "INSERT INTO ai.steps" in query
+    )
+    assert "Que productos tienen el food cost mas alto?" not in step_payloads
+    assert "question_length" in step_payloads
 
 
 @pytest.mark.asyncio

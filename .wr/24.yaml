@@ -1,0 +1,59 @@
+# Compact Codex plan for wr-plan / wr-exec. Keep <=80 lines.
+issue: 24
+title: "Harden streaming tests docs and compatibility"
+repo: waro-ai-agents
+repo_remote: waro-labs/waro-ai-agents
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/waro-ai-agents
+stack: fastapi
+branch: wr-24-harden-streaming-tests-docs
+
+paths:
+  - services/agent-api/app/main.py
+  - services/agent-api/app/streaming.py
+  - services/agent-api/app/workflows/sales.py
+  - services/agent-api/app/workflows/food_cost.py
+  - services/agent-api/tests/test_streaming.py
+  - services/agent-api/tests/test_sales_workflow.py
+  - services/agent-api/tests/test_food_cost_workflow.py
+  - services/agent-api/tests/test_llm.py
+  - services/agent-api/tests/test_api_routes.py
+  - services/agent-api/README.md
+
+ac:
+  - Streaming behavior is covered by workflow tests and FastAPI route tests.
+  - README includes curl/SSE examples for sales and food-cost stream routes.
+  - README marks sync endpoints as compatibility-only; do not remove them.
+  - README documents api_warocol proxy expectations for signed SSE forwarding.
+  - Manual validation command is included for PR.
+  - Phoenix/OpenTelemetry metadata and stream events do not duplicate raw prompts/messages.
+
+out_of_scope:
+  - New agent domains beyond sales and food-cost.
+  - Removing or deprecating sync endpoints beyond compatibility docs.
+  - Reworking streaming event contract names from the existing contract.
+  - Changing api_warocol implementation in another repo.
+
+hints:
+  entry: "services/agent-api/app/main.py:92 sync routes and :105/:127 stream routes"
+  pattern: "services/agent-api/tests/test_streaming.py:28 contract tests; workflow generator tests already exist"
+  docs: "services/agent-api/README.md:5 still lists future conversation/event-buffer endpoints"
+  privacy: "sales.py:223 and food_cost.py:221 currently store request.question in step input_json"
+  route_tests: "add TestClient/httpx ASGI tests for sync and /stream endpoints with dependency overrides"
+  compatibility: "new clients prefer /stream; sync remains transition path for api_warocol"
+  api_warocol: "validate tenant/session/scopes, sign context headers, preserve x-waro-request-id, proxy text/event-stream without buffering"
+  tests: "cd services/agent-api && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && PYTHONPATH=. pytest"
+
+risk:
+  sensitive: true
+  areas:
+    - "Prompt/message privacy in Phoenix traces and ai.steps metadata"
+    - "SSE route tests may need dependency overrides to avoid real DB/CLI/LLM calls"
+    - "Validation depends on installing langgraph from requirements"
+
+skip:
+  audits:
+    - "No full epic re-research; use issue #24 delta comment"
+    - "No external api_warocol repo edits"
+
+next:
+  after_pr: "PR should include Closes #24 and list PYTHONPATH=. pytest validation."

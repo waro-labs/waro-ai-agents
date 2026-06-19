@@ -220,7 +220,7 @@ class SalesWorkflow:
             tenant_id=state["context"].tenant_id,
             step_type="router",
             name="sales_intent_router",
-            input_json={"question": state["request"].question},
+            input_json={"question_length": len(state["request"].question)},
             output_json={"intent": "sales_metrics"},
             output_summary="Routed request to the sales workflow.",
         )
@@ -513,7 +513,6 @@ class SalesWorkflow:
         )
         highlights = self._highlights(metrics)
         return {
-            "question": request.question,
             "period": period,
             "metrics": metrics,
             "highlights": highlights,

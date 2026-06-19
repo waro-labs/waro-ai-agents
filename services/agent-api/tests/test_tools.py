@@ -232,7 +232,8 @@ async def test_gateway_persists_sanitized_success():
     assert response.status == "succeeded"
     assert response.tool_call_id == connection.tool_call_id
     assert len(connection.fetches) == 1
-    assert len(connection.executes) == 3
+    assert len(connection.executes) == 4
+    assert "UPDATE ai.runs" in connection.executes[0][0]
     insert_args = connection.fetches[0][1]
     assert "WARO_API_KEY" not in str(insert_args)
     assert '"fields": ["id", "name"]' in insert_args[4]
@@ -275,7 +276,8 @@ async def test_gateway_persists_sanitized_error():
 
     assert response.status == "failed"
     assert "super-secret-key" not in str(response.error)
-    assert len(connection.executes) == 3
+    assert len(connection.executes) == 4
+    assert "UPDATE ai.runs" in connection.executes[0][0]
 
 
 @pytest.mark.asyncio
