@@ -208,6 +208,78 @@ The Docker image copies `services/agent-api/.local/bin/waro` into
 the local binary before building the image. Runtime API credentials should be
 provided through environment variables, not baked into the image.
 
+## Server compose runbook
+
+Use `infra/docker-compose.server.yml` for the server-facing `agent-api` runtime.
+The local dev compose remains available at `infra/docker-compose.yml`.
+
+From the server checkout:
+
+```bash
+cd /srv/waro/waro-ai-agents
+cp .env.example .env
+$EDITOR .env
+```
+
+Set real values in `.env` and keep that file out of git. Required server values
+include:
+
+- `DATABASE_URL`: shared Postgres URL reachable through the external
+  `postgresqlwarolabs_default` Docker network.
+- `INTERNAL_SIGNATURE_SECRET`: same value later configured in `api_warocol.com`.
+- `WARO_API_URL` and `WARO_API_KEY`: runtime credentials passed to the `waro`
+  CLI/tool gateway.
+- `REDIS_URL=redis://redis:6379/0`: default for the Redis service owned by the
+  server compose.
+- `OTEL_ENABLED=false`: recommended when Phoenix is not running on the server.
+
+Provision `waro-cli` before building the image. Build from the sibling checkout:
+
+```bash
+cd services/agent-api
+./scripts/install-local-waro-cli.sh --from-source ../../../waro-cli
+cd ../..
+```
+
+If the server already has a trusted compiled binary, copy it instead:
+
+```bash
+cd services/agent-api
+./scripts/install-local-waro-cli.sh --from-path /path/to/waro
+cd ../..
+```
+
+Validate and start the server compose:
+
+```bash
+docker compose -f infra/docker-compose.server.yml config
+docker compose -f infra/docker-compose.server.yml up -d --build agent-api
+docker compose -f infra/docker-compose.server.yml ps
+curl http://127.0.0.1:8100/health
+docker compose -f infra/docker-compose.server.yml logs --tail=100 agent-api
+```
+
+Common operations:
+
+```bash
+docker compose -f infra/docker-compose.server.yml logs -f agent-api
+docker compose -f infra/docker-compose.server.yml restart agent-api
+docker compose -f infra/docker-compose.server.yml down
+```
+
+If the server has the legacy Compose binary instead of the Docker Compose v2
+plugin, use `docker-compose` with the same flags.
+
+The server compose binds `agent-api` to `127.0.0.1:${AGENT_API_PORT:-8100}` and
+does not publish Redis. `api_warocol.com` remains the public boundary for agent
+features; do not expose `/internal/ai/*` directly to the internet.
+
+Phoenix is optional observability. To run it for local/server trace inspection:
+
+```bash
+docker compose -f infra/docker-compose.server.yml --profile observability up -d phoenix
+```
+
 Run with local Phoenix trace inspection:
 
 ```bash

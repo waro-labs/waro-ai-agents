@@ -53,9 +53,10 @@ the WARO user context before forwarding signed internal requests.
   checks, but it should still be reachable only through the selected private or
   localhost topology.
 
-The current `infra/docker-compose.yml` is local/dev oriented. Later deployment
-batches may add a server compose file or network changes, but this contract does
-not change production server state.
+`infra/docker-compose.yml` remains local/dev oriented.
+`infra/docker-compose.server.yml` is the production-adjacent operator compose for
+`agent-api`; it binds the API to localhost by default and keeps Redis on the
+private compose network.
 
 ## Environment Contract
 
@@ -66,7 +67,7 @@ Configure these values in the `waro-ai-agents` runtime environment:
 | Variable | Required | Owner | Notes |
 |---|---:|---|---|
 | `DATABASE_URL` | yes | `agent-api` | Postgres connection for `ai`, `rag`, and `audit` data. |
-| `REDIS_URL` | yes | `agent-api` | Runtime locks, cache, and active stream state. |
+| `REDIS_URL` | yes | `agent-api` | Runtime locks, cache, and active stream state. Server compose defaults to its owned Redis service. |
 | `INTERNAL_SIGNATURE_SECRET` | yes | shared | Same value as `api_warocol.com`; never commit it. |
 | `WARO_CLI_BINARY` | yes | `agent-api` | Path to the installed `waro` CLI inside the runtime. |
 | `WARO_API_URL` | yes | `agent-api` | Base URL used by the CLI/tool gateway. |
@@ -77,6 +78,7 @@ Configure these values in the `waro-ai-agents` runtime environment:
 | `KIMI_MODEL` | when Kimi enabled | `agent-api` | Model used for workflow summaries. |
 | `LLM_TIMEOUT_SECONDS` | yes | `agent-api` | LLM request timeout. |
 | `OTEL_ENABLED` | optional | `agent-api` | Set `false` in production if no collector is deployed. |
+| `AGENT_API_PORT` | optional | `agent-api` | Host localhost port used by `infra/docker-compose.server.yml`; defaults to `8100`. |
 | `PHOENIX_COLLECTOR_ENDPOINT` | local/dev | `agent-api` | Local trace receiver endpoint. Not a production dependency. |
 | `OTEL_SERVICE_NAME` | optional | `agent-api` | Defaults to `waro-ai-agents`. |
 | `OTEL_EXPORT_TIMEOUT_SECONDS` | optional | `agent-api` | Export timeout for telemetry. |
@@ -103,14 +105,33 @@ the canonical order implemented in
 
 ## Manual Validation
 
-Before `api_warocol.com` proxy routes exist, validate the internal service:
+Before `api_warocol.com` proxy routes exist, validate the internal service from
+the server checkout:
 
 ```bash
 cd /srv/waro/waro-ai-agents
-docker compose -f infra/docker-compose.yml config
-docker compose -f infra/docker-compose.yml up --build agent-api
+cp .env.example .env
+$EDITOR .env
+cd services/agent-api
+./scripts/install-local-waro-cli.sh --from-source ../../../waro-cli
+cd ../..
+docker compose -f infra/docker-compose.server.yml config
+docker compose -f infra/docker-compose.server.yml up -d --build agent-api
 curl http://127.0.0.1:8100/health
+docker compose -f infra/docker-compose.server.yml logs --tail=100 agent-api
 ```
+
+Operational commands for the server compose:
+
+```bash
+docker compose -f infra/docker-compose.server.yml ps
+docker compose -f infra/docker-compose.server.yml logs -f agent-api
+docker compose -f infra/docker-compose.server.yml restart agent-api
+docker compose -f infra/docker-compose.server.yml down
+```
+
+If the server has the legacy Compose binary instead of the Docker Compose v2
+plugin, use `docker-compose` with the same flags.
 
 After the proxy batch lands, validate both public SSE routes through
 `api_warocol.com` with a real tenant/profile/member and confirm:
@@ -123,5 +144,4 @@ After the proxy batch lands, validate both public SSE routes through
 
 - Implementing the public `api_warocol.com` proxy.
 - Changing production server state.
-- Adding a production compose topology.
 - Deploying Phoenix as a required production service.
