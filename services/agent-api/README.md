@@ -12,6 +12,8 @@ This service should expose internal endpoints only:
 - `POST /internal/tools/call`
 
 The public WARO API should validate user/session/tenant permissions before calling this service.
+See the repository-level [production deployment contract](../../docs/deployment-contract.md)
+for server layout, env ownership, and network exposure decisions.
 
 ## Local run
 
