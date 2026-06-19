@@ -6,7 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
-from app.llm.base import LLMMessage, LLMResponse
+from app.llm.base import LLMMessage, LLMResponse, LLMStreamChunk
 from app.tools.models import ToolCallResponse
 from app.workflows.food_cost import FoodCostWorkflow
 from app.workflows.models import FoodCostQuestionRequest
@@ -99,6 +99,26 @@ class FakeLLMAdapter:
         if self.response:
             return self.response
         return LLMResponse(content=self.content, model="fake-model", provider=self.provider)
+
+
+class FakeStreamingLLMAdapter(FakeLLMAdapter):
+    async def stream_complete(self, *, messages, temperature=0.2):
+        self.calls.append(messages)
+        yield LLMStreamChunk(text="Resumen")
+        yield LLMStreamChunk(text=" Kimi")
+        yield LLMStreamChunk(text=" de food cost.")
+        yield LLMStreamChunk(
+            response=LLMResponse(
+                content="Resumen Kimi de food cost.",
+                model="fake-model",
+                provider=self.provider,
+                input_tokens=100,
+                output_tokens=40,
+                total_tokens=140,
+                estimated_cost_usd=0.0001,
+                cost_source="test",
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -281,6 +301,66 @@ async def test_food_cost_workflow_streams_event_order_and_final_payload():
     assert "INSERT INTO ai.steps" in fetched_sql
     assert executed_sql.count("INSERT INTO ai.eval_results") == 3
     assert "status = 'completed'" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_food_cost_workflow_streams_llm_token_events_before_final_payload():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeStreamingLLMAdapter()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = FoodCostWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-food-cost-token-stream",
+        member_id=None,
+        scopes=("analytics:read", "menu:read", "financial:read"),
+    )
+
+    events = [
+        event
+        async for event in workflow.stream(
+            request=FoodCostQuestionRequest(question="Resume food cost."),
+            context=context,
+        )
+    ]
+
+    event_names = [event.event for event in events]
+    assert event_names[-5:] == ["llm_started", "token", "token", "token", "final"]
+    token_payloads = [
+        parse_sse_frame(event.to_sse())[1]
+        for event in events
+        if event.event == "token"
+    ]
+    assert [payload["text"] for payload in token_payloads] == [
+        "Resumen",
+        " Kimi",
+        " de food cost.",
+    ]
+    assert all("content" not in payload for payload in token_payloads)
+    assert (
+        parse_sse_frame(events[-1].to_sse())[1]["summary"]
+        == "Resumen Kimi de food cost."
+    )
+    assert len(llm.calls) == 1
+    llm_step_args = [
+        args
+        for query, args in connection.fetches
+        if "INSERT INTO ai.steps" in query and args[2] == "llm"
+    ][0]
+    llm_step_json = f"{llm_step_args[4]} {llm_step_args[5]}"
+    assert "Resume food cost" not in llm_step_json
+    assert "test-key" not in llm_step_json
 
 
 @pytest.mark.asyncio

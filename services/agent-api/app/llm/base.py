@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -22,6 +23,12 @@ class LLMResponse:
     cost_source: str = "unavailable"
 
 
+@dataclass(frozen=True)
+class LLMStreamChunk:
+    text: str = ""
+    response: LLMResponse | None = None
+
+
 class LLMError(Exception):
     pass
 
@@ -37,6 +44,14 @@ class LLMAdapter(Protocol):
     ) -> LLMResponse:
         ...
 
+    def stream_complete(
+        self,
+        *,
+        messages: list[LLMMessage],
+        temperature: float = 0.2,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        ...
+
 
 class DisabledLLMAdapter:
     provider = "disabled"
@@ -48,3 +63,13 @@ class DisabledLLMAdapter:
         temperature: float = 0.2,
     ) -> LLMResponse:
         raise LLMError("LLM provider is disabled.")
+
+    async def stream_complete(
+        self,
+        *,
+        messages: list[LLMMessage],
+        temperature: float = 0.2,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        raise LLMError("LLM provider is disabled.")
+        if False:
+            yield LLMStreamChunk()

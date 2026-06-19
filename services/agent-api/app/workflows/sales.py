@@ -150,11 +150,15 @@ class SalesWorkflow:
                         else None,
                     },
                 )
-            summary = await self._build_summary_with_llm(
+            summary_holder: dict[str, str] = {}
+            async for event in self._stream_summary_with_llm(
                 artifact=artifact,
                 context=context,
                 run_id=run_id,
-            )
+                summary_holder=summary_holder,
+            ):
+                yield event
+            summary = summary_holder["summary"]
             evals = evaluate_sales_artifact(artifact)
             output_message_id = await self._finish_run(
                 context=context,
@@ -687,6 +691,123 @@ class SalesWorkflow:
                 output_summary=summary,
             )
             return summary
+
+    async def _stream_summary_with_llm(
+        self,
+        *,
+        artifact: dict[str, Any],
+        context: InternalRequestContext,
+        run_id: UUID,
+        summary_holder: dict[str, str],
+    ) -> AsyncIterator[StreamEvent]:
+        stream_complete = getattr(self.llm_adapter, "stream_complete", None)
+        if self.settings.llm_provider == "disabled" or stream_complete is None:
+            summary_holder["summary"] = await self._build_summary_with_llm(
+                artifact=artifact,
+                context=context,
+                run_id=run_id,
+            )
+            return
+
+        fallback_summary = self._build_summary(artifact)
+        with self.tracer.start_as_current_span("llm.sales.summary") as span:
+            span.set_attribute("openinference.span.kind", "LLM")
+            span.set_attribute("llm.provider", self.llm_adapter.provider)
+            span.set_attribute("waro.run_id", str(run_id))
+            span.set_attribute("waro.tenant_id", context.tenant_id)
+            if self.settings.llm_provider == "kimi":
+                span.set_attribute("llm.model", self.settings.kimi_model)
+                span.set_attribute("llm.model_name", self.settings.kimi_model)
+
+            try:
+                response = None
+                async for chunk in stream_complete(
+                    messages=sales_summary_messages(artifact),
+                    temperature=0.2,
+                ):
+                    if chunk.text:
+                        yield stream_event(
+                            "token",
+                            run_id=run_id,
+                            data={
+                                "provider": self.llm_adapter.provider,
+                                "model": self.settings.kimi_model
+                                if self.settings.llm_provider == "kimi"
+                                else None,
+                                "text": chunk.text,
+                            },
+                        )
+                    if chunk.response is not None:
+                        response = chunk.response
+                if response is None:
+                    raise RuntimeError("LLM stream did not include a final response.")
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                await self._record_step(
+                    run_id=run_id,
+                    tenant_id=context.tenant_id,
+                    step_type="llm",
+                    name="sales_summary",
+                    input_json={
+                        "provider": self.settings.llm_provider,
+                        "model": self.settings.kimi_model
+                        if self.settings.llm_provider == "kimi"
+                        else None,
+                    },
+                    output_json={"fallback": True, "error_type": type(exc).__name__},
+                    output_summary=fallback_summary,
+                )
+                summary_holder["summary"] = fallback_summary
+                return
+
+            summary = response.content.strip() or fallback_summary
+            span.set_attribute("llm.model", response.model)
+            span.set_attribute("llm.model_name", response.model)
+            span.set_attribute("llm.response.provider", response.provider)
+            if response.input_tokens is not None:
+                span.set_attribute("llm.usage.prompt_tokens", response.input_tokens)
+                span.set_attribute("llm.token_count.prompt", response.input_tokens)
+            if response.output_tokens is not None:
+                span.set_attribute("llm.usage.completion_tokens", response.output_tokens)
+                span.set_attribute("llm.token_count.completion", response.output_tokens)
+            if response.total_tokens is not None:
+                span.set_attribute("llm.usage.total_tokens", response.total_tokens)
+                span.set_attribute("llm.token_count.total", response.total_tokens)
+            if response.prompt_cost_usd is not None:
+                span.set_attribute("llm.cost.prompt", response.prompt_cost_usd)
+            if response.completion_cost_usd is not None:
+                span.set_attribute("llm.cost.completion", response.completion_cost_usd)
+            if response.estimated_cost_usd is not None:
+                span.set_attribute("llm.cost.estimated_usd", response.estimated_cost_usd)
+                span.set_attribute("llm.cost.total", response.estimated_cost_usd)
+            span.set_attribute("llm.cost.source", response.cost_source)
+            span.set_status(Status(StatusCode.OK))
+            await self._record_step(
+                run_id=run_id,
+                tenant_id=context.tenant_id,
+                step_type="llm",
+                name="sales_summary",
+                input_json={
+                    "provider": response.provider,
+                    "model": response.model,
+                    "message_count": 2,
+                },
+                output_json={
+                    "fallback": summary == fallback_summary,
+                    "llm_usage": {
+                        "input_count": response.input_tokens,
+                        "output_count": response.output_tokens,
+                        "total_count": response.total_tokens,
+                    },
+                    "llm_cost": {
+                        "estimated_cost_usd": response.estimated_cost_usd,
+                        "source": response.cost_source,
+                    },
+                },
+                output_summary=summary,
+            )
+            summary_holder["summary"] = summary
 
     async def _finish_run(
         self,
