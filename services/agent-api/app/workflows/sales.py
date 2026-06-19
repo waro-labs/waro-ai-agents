@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
 import json
-from datetime import datetime, timedelta
+import re
+import unicodedata
+from datetime import date, datetime, timedelta
 from typing import Any, TypedDict
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -474,7 +476,7 @@ class SalesWorkflow:
             "date-to": period["date_to"],
             "group-by": request.group_by,
         }
-        fields = ["totalSales", "orderCount", "avgTicket", "series"]
+        fields = ["data", "meta", "success"]
         step_id = await self._record_step(
             run_id=run_id,
             tenant_id=context.tenant_id,
@@ -501,14 +503,15 @@ class SalesWorkflow:
         tool_calls: list[dict[str, Any]],
     ) -> dict[str, Any]:
         period = self._resolve_period(request)
-        rows = self._rows_for(tool_calls, "waro.sales.metrics")
-        first_row = rows[0] if rows else {}
+        metric_data = self._metrics_data_for(tool_calls, "waro.sales.metrics")
         metrics = sanitize_value(
             {
-                "total_sales": first_row.get("totalSales"),
-                "order_count": first_row.get("orderCount"),
-                "avg_ticket": first_row.get("avgTicket"),
-                "series": first_row.get("series"),
+                "total_sales": metric_data.get("totalSales"),
+                "order_count": metric_data.get("totalOrders")
+                if metric_data.get("totalOrders") is not None
+                else metric_data.get("orderCount"),
+                "avg_ticket": metric_data.get("avgTicket"),
+                "series": metric_data.get("series"),
             }
         )
         highlights = self._highlights(metrics)
@@ -561,9 +564,69 @@ class SalesWorkflow:
     def _resolve_period(self, request: SalesQuestionRequest) -> dict[str, str]:
         if request.date_from and request.date_to:
             return {"date_from": request.date_from, "date_to": request.date_to}
-        yesterday = datetime.now(ZoneInfo("America/Bogota")).date() - timedelta(days=1)
+        today = datetime.now(ZoneInfo("America/Bogota")).date()
+        inferred = self._infer_period_from_question(request.question, today=today)
+        if inferred:
+            return {
+                "date_from": request.date_from or inferred["date_from"],
+                "date_to": request.date_to or inferred["date_to"],
+            }
+        yesterday = today - timedelta(days=1)
         value = yesterday.isoformat()
         return {"date_from": request.date_from or value, "date_to": request.date_to or value}
+
+    def _infer_period_from_question(
+        self,
+        question: str,
+        *,
+        today: date,
+    ) -> dict[str, str] | None:
+        normalized = self._normalize_question(question)
+        if re.search(r"\b(hoy|dia actual)\b", normalized):
+            value = today.isoformat()
+            return {"date_from": value, "date_to": value}
+        if re.search(r"\bayer\b", normalized):
+            value = (today - timedelta(days=1)).isoformat()
+            return {"date_from": value, "date_to": value}
+        if re.search(r"\b(este mes|del mes|mes actual|month to date|mtd)\b", normalized):
+            start = today.replace(day=1)
+            return {"date_from": start.isoformat(), "date_to": today.isoformat()}
+        if re.search(r"\b(esta semana|semana actual)\b", normalized):
+            start = today - timedelta(days=today.weekday())
+            return {"date_from": start.isoformat(), "date_to": today.isoformat()}
+        if re.search(r"\b(ultimos 7 dias|ultimos siete dias)\b", normalized):
+            start = today - timedelta(days=6)
+            return {"date_from": start.isoformat(), "date_to": today.isoformat()}
+        return None
+
+    def _normalize_question(self, question: str) -> str:
+        folded = question.casefold().strip()
+        without_accents = "".join(
+            char
+            for char in unicodedata.normalize("NFKD", folded)
+            if not unicodedata.combining(char)
+        )
+        return " ".join(without_accents.split())
+
+    def _metrics_data_for(
+        self,
+        tool_calls: list[dict[str, Any]],
+        tool_name: str,
+    ) -> dict[str, Any]:
+        for call in tool_calls:
+            if call["tool_name"] != tool_name or call["status"] != "succeeded":
+                continue
+            result = call.get("result")
+            if isinstance(result, dict):
+                data = result.get("data")
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, list) and data and isinstance(data[0], dict):
+                    return data[0]
+                return result
+            if isinstance(result, list) and result and isinstance(result[0], dict):
+                return result[0]
+        return {}
 
     def _rows_for(self, tool_calls: list[dict[str, Any]], tool_name: str) -> list[dict[str, Any]]:
         for call in tool_calls:

@@ -45,11 +45,13 @@ def sales_summary_messages(artifact: dict[str, Any]) -> list[LLMMessage]:
         LLMMessage(
             role="system",
             content=(
-                "Eres un analista de ventas para restaurantes WARO. "
-                "Responde en español, de forma breve y ejecutiva. "
-                "Usa solo los datos del JSON, menciona periodo, ventas totales, "
-                "numero de ordenes si esta disponible y ticket promedio si esta disponible. "
-                "No inventes valores faltantes."
+                "Eres Kali, una analista senior de ventas para restaurantes en WARO Colombia. "
+                "Responde en espanol claro, ejecutivo y util para un dueno o administrador. "
+                "Usa unicamente los datos del JSON: no inventes ventas, ordenes, tickets, "
+                "productos, tendencias ni comparaciones. Prioriza ventas totales, numero de "
+                "ordenes, ticket promedio, periodo analizado y una lectura comercial breve. "
+                "Cuando haya datos suficientes, cierra con una accion concreta para mejorar "
+                "ventas; si faltan datos, dilo de forma directa."
             ),
         ),
         LLMMessage(
