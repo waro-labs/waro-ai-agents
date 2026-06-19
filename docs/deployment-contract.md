@@ -10,7 +10,7 @@ Keep the agent runtime and public API as separate sibling checkouts on the same
 server:
 
 ```text
-/srv/waro/
+/home/saifer/
   api_warocol.com/    # public WARO FastAPI backend
   waro-ai-agents/     # internal agent runtime
 ```
@@ -46,17 +46,23 @@ the WARO user context before forwarding signed internal requests.
 
 - Prefer Docker service DNS or a shared private Docker network for
   `api_warocol.com -> agent-api`.
-- A localhost binding such as `127.0.0.1:8100` is acceptable when both services
-  run on the same host and the compose topology requires it.
+- On `warolabs`, use the shared external Docker network `waro-network` and set
+  `AGENT_API_URL=http://agent-api:8100` in `api_warocol.com`.
+- A localhost binding such as `127.0.0.1:8100` is acceptable only as a host-side
+  bind for operator health checks or a host reverse proxy. Do not use
+  `localhost` or `127.0.0.1` as the URL from inside `api_warocol.com`; inside a
+  container it points back to that same container.
 - Do not expose `/internal/ai/*` routes directly to the internet.
 - `GET /health` may remain unauthenticated for local and container health
-  checks, but it should still be reachable only through the selected private or
-  localhost topology.
+  checks, but it should still be reachable only through the selected private
+  Docker network or host-local bind.
 
 `infra/docker-compose.yml` remains local/dev oriented.
 `infra/docker-compose.server.yml` is the production-adjacent operator compose for
 `agent-api`; it binds the API to localhost by default and keeps Redis on the
-private compose network.
+private compose network. It also joins the external runtime network configured
+by `WARO_RUNTIME_NETWORK`, defaulting to `waro-network`, so `api_warocol.com` can
+reach `http://agent-api:8100` by Docker DNS.
 
 ## Environment Contract
 
@@ -79,6 +85,7 @@ Configure these values in the `waro-ai-agents` runtime environment:
 | `LLM_TIMEOUT_SECONDS` | yes | `agent-api` | LLM request timeout. |
 | `OTEL_ENABLED` | optional | `agent-api` | Set `false` in production if no collector is deployed. |
 | `AGENT_API_PORT` | optional | `agent-api` | Host localhost port used by `infra/docker-compose.server.yml`; defaults to `8100`. |
+| `WARO_RUNTIME_NETWORK` | optional | shared | External Docker network shared with `api_warocol.com`; defaults to `waro-network`. |
 | `PHOENIX_COLLECTOR_ENDPOINT` | local/dev | `agent-api` | Local trace receiver endpoint. Not a production dependency. |
 | `OTEL_SERVICE_NAME` | optional | `agent-api` | Defaults to `waro-ai-agents`. |
 | `OTEL_EXPORT_TIMEOUT_SECONDS` | optional | `agent-api` | Export timeout for telemetry. |
@@ -90,14 +97,15 @@ events, service logs, and persisted `ai.runs` rows.
 
 ### `api_warocol.com`
 
-Future proxy batches should add these values to the public API runtime:
+Configure these values in the public API runtime:
 
 | Variable | Required | Owner | Notes |
 |---|---:|---|---|
-| `AGENT_API_URL` | yes | `api_warocol.com` | Private URL for `agent-api`, such as service DNS or localhost. |
+| `AGENT_API_URL` | yes | `api_warocol.com` | Private URL for `agent-api`; on `warolabs` use `http://agent-api:8100`. |
 | `INTERNAL_SIGNATURE_SECRET` | yes | shared | Same value as `agent-api`; used to sign internal requests. |
 | `AGENT_API_CONNECT_TIMEOUT_SECONDS` | yes | `api_warocol.com` | Short connect timeout for upstream setup. |
 | `AGENT_API_READ_TIMEOUT_SECONDS` | yes | `api_warocol.com` | SSE-compatible read timeout; must allow long-lived streams. |
+| `WARO_RUNTIME_NETWORK` | optional | shared | External Docker network shared with `agent-api`; defaults to `waro-network`. |
 
 `api_warocol.com` should sign the exact JSON body and WARO context headers using
 the canonical order implemented in
@@ -109,16 +117,27 @@ Before `api_warocol.com` proxy routes exist, validate the internal service from
 the server checkout:
 
 ```bash
-cd /srv/waro/waro-ai-agents
+cd /home/saifer/waro-ai-agents
 cp .env.example .env
 $EDITOR .env
 cd services/agent-api
 ./scripts/install-local-waro-cli.sh --from-source ../../../waro-cli
 cd ../..
+docker network inspect "${WARO_RUNTIME_NETWORK:-waro-network}"
 docker compose -f infra/docker-compose.server.yml config
 docker compose -f infra/docker-compose.server.yml up -d --build agent-api
 curl http://127.0.0.1:8100/health
 docker compose -f infra/docker-compose.server.yml logs --tail=100 agent-api
+```
+
+After `api_warocol.com` is attached to the same runtime network, validate the
+container-to-container path from the API runtime context:
+
+```bash
+docker exec api-warocolcom-web-1 python - <<'PY'
+import urllib.request
+print(urllib.request.urlopen("http://agent-api:8100/health", timeout=5).read().decode())
+PY
 ```
 
 Operational commands for the server compose:

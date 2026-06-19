@@ -216,7 +216,7 @@ The local dev compose remains available at `infra/docker-compose.yml`.
 From the server checkout:
 
 ```bash
-cd /srv/waro/waro-ai-agents
+cd /home/saifer/waro-ai-agents
 cp .env.example .env
 $EDITOR .env
 ```
@@ -231,6 +231,8 @@ include:
   CLI/tool gateway.
 - `REDIS_URL=redis://redis:6379/0`: default for the Redis service owned by the
   server compose.
+- `WARO_RUNTIME_NETWORK=waro-network`: shared external Docker network used by
+  `api_warocol.com` to reach `http://agent-api:8100` by container DNS.
 - `OTEL_ENABLED=false`: recommended when Phoenix is not running on the server.
 
 Provision `waro-cli` before building the image. Build from the sibling checkout:
@@ -252,6 +254,7 @@ cd ../..
 Validate and start the server compose:
 
 ```bash
+docker network inspect "${WARO_RUNTIME_NETWORK:-waro-network}"
 docker compose -f infra/docker-compose.server.yml config
 docker compose -f infra/docker-compose.server.yml up -d --build agent-api
 docker compose -f infra/docker-compose.server.yml ps
@@ -271,8 +274,22 @@ If the server has the legacy Compose binary instead of the Docker Compose v2
 plugin, use `docker-compose` with the same flags.
 
 The server compose binds `agent-api` to `127.0.0.1:${AGENT_API_PORT:-8100}` and
-does not publish Redis. `api_warocol.com` remains the public boundary for agent
-features; do not expose `/internal/ai/*` directly to the internet.
+does not publish Redis. That bind is for host-side operator checks or a host
+reverse proxy only. `api_warocol.com` must call `agent-api` through the shared
+Docker network with `AGENT_API_URL=http://agent-api:8100`; do not use
+`localhost` or `127.0.0.1` from inside the API container. `api_warocol.com`
+remains the public boundary for agent features; do not expose `/internal/ai/*`
+directly to the internet.
+
+Validate the private runtime path from the API container after both services are
+on the shared network:
+
+```bash
+docker exec api-warocolcom-web-1 python - <<'PY'
+import urllib.request
+print(urllib.request.urlopen("http://agent-api:8100/health", timeout=5).read().decode())
+PY
+```
 
 Phoenix is optional observability. To run it for local/server trace inspection:
 
