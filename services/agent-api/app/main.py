@@ -2,14 +2,22 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI
+from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
 from app.database import DatabasePool
 from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
 from app.telemetry import configure_tracing, instrument_app
+from app.streaming import streaming_response
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
 from app.workflows.food_cost import FoodCostWorkflow
-from app.workflows.models import FoodCostQuestionRequest, FoodCostWorkflowResponse
+from app.workflows.models import (
+    FoodCostQuestionRequest,
+    FoodCostWorkflowResponse,
+    SalesQuestionRequest,
+    SalesWorkflowResponse,
+)
+from app.workflows.sales import SalesWorkflow
 
 
 @asynccontextmanager
@@ -28,15 +36,20 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
-instrument_app(app, get_settings())
+instrument_app(app, get_settings())  # HTTP generates spans for internal requests
 
 
+# Factories
 def get_tool_gateway() -> ToolGateway:
     return ToolGateway(settings=get_settings())
 
 
 def get_food_cost_workflow() -> FoodCostWorkflow:
     return FoodCostWorkflow(settings=get_settings())
+
+
+def get_sales_workflow() -> SalesWorkflow:
+    return SalesWorkflow(settings=get_settings())
 
 
 @app.get("/health", tags=["health"])
@@ -87,3 +100,25 @@ async def ask_food_cost(
     workflow: FoodCostWorkflow = Depends(get_food_cost_workflow),
 ) -> FoodCostWorkflowResponse:
     return await workflow.run(request=request, context=context)
+
+
+@app.post(
+    "/internal/ai/sales/messages",
+    response_model=SalesWorkflowResponse,
+    tags=["ai"],
+)
+async def ask_sales(
+    request: SalesQuestionRequest,
+    context: InternalRequestContext = Depends(require_internal_request),
+    workflow: SalesWorkflow = Depends(get_sales_workflow),
+) -> SalesWorkflowResponse:
+    return await workflow.run(request=request, context=context)
+
+
+@app.post("/internal/ai/sales/messages/stream", tags=["ai"])
+async def stream_sales(
+    request: SalesQuestionRequest,
+    context: InternalRequestContext = Depends(require_internal_request),
+    workflow: SalesWorkflow = Depends(get_sales_workflow),
+) -> StreamingResponse:
+    return streaming_response(workflow.stream(request=request, context=context))
