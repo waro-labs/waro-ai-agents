@@ -27,8 +27,12 @@ def configure_tracing(settings: Settings) -> None:
         }
     )
     provider = TracerProvider(resource=resource)
+    headers = None
+    if settings.phoenix_api_key:
+        headers = (("authorization", f"Bearer {settings.phoenix_api_key}"),)
     exporter = OTLPSpanExporter(
         endpoint=settings.phoenix_collector_endpoint,
+        headers=headers,
         insecure=settings.phoenix_collector_endpoint.startswith("http://"),
         timeout=settings.otel_export_timeout_seconds,
     )
