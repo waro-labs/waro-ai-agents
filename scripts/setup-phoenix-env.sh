@@ -58,7 +58,8 @@ upsert_env "PHOENIX_ROOT_URL" "$ROOT_URL"
 upsert_env "PHOENIX_CSRF_TRUSTED_ORIGINS" "$ROOT_URL"
 upsert_env "PHOENIX_SQL_DATABASE_URL" "sqlite:////data/phoenix.db"
 upsert_env "OTEL_ENABLED" "true"
-upsert_env "PHOENIX_COLLECTOR_ENDPOINT" "http://phoenix:4317"
+upsert_env "PHOENIX_COLLECTOR_ENDPOINT" "http://phoenix:6006/v1/traces"
+upsert_env "PHOENIX_COLLECTOR_PROTOCOL" "http/protobuf"
 
 # The admin secret can authenticate ingestion immediately. Replace this later
 # with a Phoenix System API Key created from the UI.

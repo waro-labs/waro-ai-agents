@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+    OTLPSpanExporter as OTLPGrpcSpanExporter,
+)
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    OTLPSpanExporter as OTLPHttpSpanExporter,
+)
 from opentelemetry.sdk.resources import DEPLOYMENT_ENVIRONMENT, SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -27,15 +32,25 @@ def configure_tracing(settings: Settings) -> None:
         }
     )
     provider = TracerProvider(resource=resource)
-    headers = None
-    if settings.phoenix_api_key:
-        headers = (("authorization", f"Bearer {settings.phoenix_api_key}"),)
-    exporter = OTLPSpanExporter(
-        endpoint=settings.phoenix_collector_endpoint,
-        headers=headers,
-        insecure=settings.phoenix_collector_endpoint.startswith("http://"),
-        timeout=settings.otel_export_timeout_seconds,
-    )
+    if settings.phoenix_collector_protocol == "http/protobuf":
+        headers = None
+        if settings.phoenix_api_key:
+            headers = {"authorization": f"Bearer {settings.phoenix_api_key}"}
+        exporter = OTLPHttpSpanExporter(
+            endpoint=settings.phoenix_collector_endpoint,
+            headers=headers,
+            timeout=settings.otel_export_timeout_seconds,
+        )
+    else:
+        headers = None
+        if settings.phoenix_api_key:
+            headers = (("authorization", f"Bearer {settings.phoenix_api_key}"),)
+        exporter = OTLPGrpcSpanExporter(
+            endpoint=settings.phoenix_collector_endpoint,
+            headers=headers,
+            insecure=settings.phoenix_collector_endpoint.startswith("http://"),
+            timeout=settings.otel_export_timeout_seconds,
+        )
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     _CONFIGURED = True

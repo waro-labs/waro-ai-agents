@@ -15,6 +15,10 @@ class Settings(BaseSettings):
         default="http://phoenix:4317",
         alias="PHOENIX_COLLECTOR_ENDPOINT",
     )
+    phoenix_collector_protocol: Literal["grpc", "http/protobuf"] = Field(
+        default="grpc",
+        alias="PHOENIX_COLLECTOR_PROTOCOL",
+    )
     phoenix_api_key: str | None = Field(default=None, alias="PHOENIX_API_KEY")
     otel_service_name: str = Field(default="waro-ai-agents", alias="OTEL_SERVICE_NAME")
     otel_enabled: bool = Field(default=True, alias="OTEL_ENABLED")
