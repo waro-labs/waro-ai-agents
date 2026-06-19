@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import json
 from uuid import UUID, uuid4
 
 import pytest
@@ -9,6 +10,15 @@ from app.llm.base import LLMMessage, LLMResponse
 from app.tools.models import ToolCallResponse
 from app.workflows.food_cost import FoodCostWorkflow
 from app.workflows.models import FoodCostQuestionRequest
+
+
+def parse_sse_frame(frame: str) -> tuple[str, dict]:
+    lines = frame.splitlines()
+    event_line = next(line for line in lines if line.startswith("event: "))
+    data_line = next(line for line in lines if line.startswith("data: "))
+    return event_line.removeprefix("event: "), json.loads(
+        data_line.removeprefix("data: ")
+    )
 
 
 class FakeConnection:
@@ -189,6 +199,88 @@ async def test_food_cost_workflow_uses_llm_summary_when_enabled():
     fetched_sql = "\n".join(query for query, _ in connection.fetches)
     assert "food_cost_summary" in str(connection.fetches)
     assert "INSERT INTO ai.steps" in fetched_sql
+
+
+@pytest.mark.asyncio
+async def test_food_cost_workflow_streams_event_order_and_final_payload():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeLLMAdapter(content="Resumen Kimi de food cost.")
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = FoodCostWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-food-cost-stream",
+        member_id=None,
+        scopes=("analytics:read", "menu:read", "financial:read"),
+    )
+
+    events = [
+        event
+        async for event in workflow.stream(
+            request=FoodCostQuestionRequest(
+                question="Que productos tienen el food cost mas alto?",
+                date_from="2026-06-01",
+                date_to="2026-06-18",
+            ),
+            context=context,
+        )
+    ]
+
+    assert [event.event for event in events] == [
+        "run_started",
+        "step_started",
+        "tool_started",
+        "tool_finished",
+        "tool_started",
+        "tool_finished",
+        "tool_started",
+        "tool_finished",
+        "llm_started",
+        "final",
+    ]
+    assert [call.tool_name for call in gateway.calls] == [
+        "waro.analytics.food_cost",
+        "waro.menu.products",
+        "waro.financial.products",
+    ]
+
+    final_event_name, final_payload = parse_sse_frame(events[-1].to_sse())
+    assert final_event_name == "final"
+    assert final_payload["status"] == "completed"
+    assert final_payload["summary"] == "Resumen Kimi de food cost."
+    assert final_payload["artifact_summary"]["period"] == {
+        "date_from": "2026-06-01",
+        "date_to": "2026-06-18",
+        "compare_to": None,
+    }
+    assert final_payload["artifact_summary"]["low_margin_products"][0]["name"] == "Arepa"
+    assert [
+        call["tool_name"]
+        for call in final_payload["artifact_summary"]["tool_calls"]
+    ] == [
+        "waro.analytics.food_cost",
+        "waro.menu.products",
+        "waro.financial.products",
+    ]
+    assert "question" not in final_payload["artifact_summary"]
+
+    executed_sql = "\n".join(query for query, _ in connection.executes)
+    fetched_sql = "\n".join(query for query, _ in connection.fetches)
+    assert "INSERT INTO ai.runs" in fetched_sql
+    assert "INSERT INTO ai.steps" in fetched_sql
+    assert executed_sql.count("INSERT INTO ai.eval_results") == 3
+    assert "status = 'completed'" in executed_sql
 
 
 @pytest.mark.asyncio

@@ -102,6 +102,15 @@ async def ask_food_cost(
     return await workflow.run(request=request, context=context)
 
 
+@app.post("/internal/ai/food-cost/messages/stream", tags=["ai"])
+async def stream_food_cost(
+    request: FoodCostQuestionRequest,
+    context: InternalRequestContext = Depends(require_internal_request),
+    workflow: FoodCostWorkflow = Depends(get_food_cost_workflow),
+) -> StreamingResponse:
+    return streaming_response(workflow.stream(request=request, context=context))
+
+
 @app.post(
     "/internal/ai/sales/messages",
     response_model=SalesWorkflowResponse,
