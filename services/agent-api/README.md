@@ -197,7 +197,7 @@ Docker compose from the repository root:
 
 ```bash
 cd services/agent-api
-./scripts/install-local-waro-cli.sh --from-source ../../../waro-cli
+./scripts/build-linux-waro-cli.sh --source ../../../waro-cli
 cd ../..
 docker compose -f infra/docker-compose.yml up --build agent-api
 curl http://127.0.0.1:8100/health
@@ -242,7 +242,7 @@ Provision `waro-cli` before building the image. Build from the sibling checkout:
 
 ```bash
 cd services/agent-api
-./scripts/install-local-waro-cli.sh --from-source ../../../waro-cli
+./scripts/build-linux-waro-cli.sh --source ../../../waro-cli
 cd ../..
 ```
 
