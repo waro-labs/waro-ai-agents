@@ -173,7 +173,6 @@ async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
     assert gateway.calls[0].arguments == {
         "date-from": "2026-06-17",
         "date-to": "2026-06-17",
-        "group-by": "date",
     }
     assert gateway.calls[0].fields == ["data", "meta", "success"]
     assert response.artifact["metrics"]["total_sales"] == 431500.0

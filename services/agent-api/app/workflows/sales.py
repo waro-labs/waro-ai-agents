@@ -474,8 +474,9 @@ class SalesWorkflow:
         arguments = {
             "date-from": period["date_from"],
             "date-to": period["date_to"],
-            "group-by": request.group_by,
         }
+        if request.group_by:
+            arguments["group-by"] = request.group_by
         fields = ["data", "meta", "success"]
         step_id = await self._record_step(
             run_id=run_id,
