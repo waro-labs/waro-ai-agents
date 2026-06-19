@@ -6,7 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
-from app.llm.base import LLMMessage, LLMResponse
+from app.llm.base import LLMMessage, LLMResponse, LLMStreamChunk
 from app.tools.models import ToolCallResponse
 from app.workflows.models import SalesQuestionRequest
 from app.workflows.sales import SalesWorkflow
@@ -80,6 +80,25 @@ class FakeLLMAdapter:
             prompt_cost_usd=0.00004,
             completion_cost_usd=0.00006,
             cost_source="test",
+        )
+
+
+class FakeStreamingLLMAdapter(FakeLLMAdapter):
+    async def stream_complete(self, *, messages, temperature=0.2):
+        self.calls.append(messages)
+        yield LLMStreamChunk(text="Ayer vendiste ")
+        yield LLMStreamChunk(text="$431.500.")
+        yield LLMStreamChunk(
+            response=LLMResponse(
+                content="Ayer vendiste $431.500.",
+                model="fake-model",
+                provider=self.provider,
+                input_tokens=100,
+                output_tokens=40,
+                total_tokens=140,
+                estimated_cost_usd=0.0001,
+                cost_source="test",
+            )
         )
 
 
@@ -246,3 +265,55 @@ async def test_sales_workflow_streams_event_order_and_final_payload():
     assert "INSERT INTO ai.steps" in fetched_sql
     assert executed_sql.count("INSERT INTO ai.eval_results") == 2
     assert "status = 'completed'" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_streams_llm_token_events_before_final_payload():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeStreamingLLMAdapter()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-token-stream",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    events = [
+        event
+        async for event in workflow.stream(
+            request=SalesQuestionRequest(question="Cuanto vendi ayer?"),
+            context=context,
+        )
+    ]
+
+    assert [event.event for event in events][-4:] == [
+        "llm_started",
+        "token",
+        "token",
+        "final",
+    ]
+    token_payloads = [
+        parse_sse_frame(event.to_sse())[1]
+        for event in events
+        if event.event == "token"
+    ]
+    assert [payload["text"] for payload in token_payloads] == [
+        "Ayer vendiste ",
+        "$431.500.",
+    ]
+    assert all("content" not in payload for payload in token_payloads)
+    assert parse_sse_frame(events[-1].to_sse())[1]["summary"] == "Ayer vendiste $431.500."
+    assert len(llm.calls) == 1

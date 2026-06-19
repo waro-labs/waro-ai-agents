@@ -103,6 +103,20 @@ def test_stream_event_rejects_reserved_payload_keys():
         StreamEvent(event="run_started", data={"event": "final"})
 
 
+def test_stream_event_accepts_safe_token_text_payload():
+    event = stream_event(
+        "token",
+        run_id="run-1",
+        data={"provider": "kimi", "model": "kimi-k2.7-code", "text": "Hola"},
+    )
+
+    event_name, data = parse_sse_frame(event.to_sse())
+
+    assert event_name == "token"
+    assert data["text"] == "Hola"
+    assert data["provider"] == "kimi"
+
+
 def test_stream_event_rejects_prompt_or_message_content_payloads():
     with pytest.raises(ValidationError, match="message content"):
         StreamEvent(

@@ -159,6 +159,94 @@ async def test_kimi_adapter_handles_missing_usage_without_cost():
 
 
 @pytest.mark.asyncio
+async def test_kimi_adapter_streams_openai_compatible_chunks_with_usage():
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        chunks = [
+            {"choices": [{"delta": {"content": "Resumen"}}]},
+            {"choices": [{"delta": {"content": " Kimi."}}]},
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 500,
+                    "total_tokens": 1500,
+                },
+            },
+        ]
+        content = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+        content += "data: [DONE]\n\n"
+        return httpx.Response(200, content=content)
+
+    adapter = KimiAdapter(
+        Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-k2.7-code",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in adapter.stream_complete(
+            messages=[LLMMessage(role="user", content="hola")]
+        )
+    ]
+
+    assert captured["payload"]["stream"] is True
+    assert [chunk.text for chunk in chunks if chunk.text] == ["Resumen", " Kimi."]
+    response = chunks[-1].response
+    assert response is not None
+    assert response.content == "Resumen Kimi."
+    assert response.input_tokens == 1000
+    assert response.output_tokens == 500
+    assert response.total_tokens == 1500
+    assert response.estimated_cost_usd == 0.00295
+    assert response.cost_source == "static:official-kimi-pricing-2026-06-18"
+
+
+@pytest.mark.asyncio
+async def test_kimi_adapter_streaming_ignores_malformed_and_irrelevant_chunks():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(
+                ": keepalive\n\n"
+                "data: {not-json}\n\n"
+                'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    adapter = KimiAdapter(
+        Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-k2.7-code",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in adapter.stream_complete(
+            messages=[LLMMessage(role="user", content="hola")]
+        )
+    ]
+
+    assert [chunk.text for chunk in chunks if chunk.text] == ["OK"]
+    response = chunks[-1].response
+    assert response is not None
+    assert response.content == "OK"
+    assert response.input_tokens is None
+    assert response.cost_source == "usage_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_kimi_adapter_requires_api_key_at_completion_time():
     adapter = KimiAdapter(Settings(LLM_PROVIDER="kimi", KIMI_API_KEY=None))
 
