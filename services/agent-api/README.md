@@ -212,6 +212,9 @@ provided through environment variables, not baked into the image.
 
 Use `infra/docker-compose.server.yml` for the server-facing `agent-api` runtime.
 The local dev compose remains available at `infra/docker-compose.yml`.
+For the final production validation checklist and `/home/saifer/bin`
+deploy-script pattern, see
+[`docs/production-validation.md`](../../docs/production-validation.md).
 
 From the server checkout:
 

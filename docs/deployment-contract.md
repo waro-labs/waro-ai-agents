@@ -113,8 +113,12 @@ the canonical order implemented in
 
 ## Manual Validation
 
-Before `api_warocol.com` proxy routes exist, validate the internal service from
-the server checkout:
+The final operator checklist lives in
+[`docs/production-validation.md`](production-validation.md). It includes the
+approval boundary for production deploys, the `/home/saifer/bin` deploy-script
+pattern, and the evidence expected for issue #35.
+
+For direct `agent-api` validation, start from the server checkout:
 
 ```bash
 cd /home/saifer/waro-ai-agents
