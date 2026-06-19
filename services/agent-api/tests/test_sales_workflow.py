@@ -122,6 +122,12 @@ def test_sales_workflow_resolves_relative_periods_from_question(monkeypatch):
         SalesQuestionRequest(question="dame las ventas de los ultimos 7 dias")
     ) == {"date_from": "2026-06-13", "date_to": "2026-06-19"}
     assert workflow._resolve_period(
+        SalesQuestionRequest(question="dime las ventas de los ultimos 15 dias")
+    ) == {"date_from": "2026-06-05", "date_to": "2026-06-19"}
+    assert workflow._resolve_period(
+        SalesQuestionRequest(question="dime las ventas de los ultimos quince dias")
+    ) == {"date_from": "2026-06-05", "date_to": "2026-06-19"}
+    assert workflow._resolve_period(
         SalesQuestionRequest(question="cuales son las ventas del dia 11 de junio del 2026")
     ) == {"date_from": "2026-06-11", "date_to": "2026-06-11"}
     assert workflow._resolve_period(
@@ -130,6 +136,16 @@ def test_sales_workflow_resolves_relative_periods_from_question(monkeypatch):
     assert workflow._resolve_period(
         SalesQuestionRequest(question="ventas 2026-06-11")
     ) == {"date_from": "2026-06-11", "date_to": "2026-06-11"}
+
+
+def test_sales_workflow_routes_small_talk_without_sales_tool():
+    workflow = SalesWorkflow(settings=Settings())
+
+    assert workflow._resolve_sales_intent("hola") == "small_talk"
+    assert workflow._resolve_sales_intent("como estas") == "small_talk"
+    assert workflow._resolve_sales_intent("funcionas") == "small_talk"
+    assert workflow._resolve_sales_intent("hola, dame las ventas de ayer") == "sales_metrics"
+    assert workflow._resolve_sales_intent("dime las ventas de los ultimos 15 dias") == "sales_metrics"
 
 
 def test_sales_workflow_keeps_explicit_dates_ahead_of_question(monkeypatch):
@@ -207,6 +223,53 @@ async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
     )
     assert "Cuanto vendi ayer?" not in step_payloads
     assert "question_length" in step_payloads
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_handles_small_talk_without_tool_call():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(),
+        gateway=gateway,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-small-talk",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    response = await workflow.run(
+        request=SalesQuestionRequest(question="hola"),
+        context=context,
+    )
+
+    assert response.status == "completed"
+    assert gateway.calls == []
+    assert response.artifact["intent"] == "small_talk"
+    assert response.artifact["period"] is None
+    assert response.artifact["tool_calls"] == []
+    assert response.summary.startswith("Hola, estoy funcionando.")
+    assert {eval_result.evaluator_name for eval_result in response.evals} == {
+        "sales_intent_guard",
+        "sales_business_usefulness",
+    }
+    assert all(eval_result.passed for eval_result in response.evals)
+    step_payloads = " ".join(
+        str(args)
+        for query, args in connection.fetches
+        if "INSERT INTO ai.steps" in query
+    )
+    assert "small_talk" in step_payloads
+    assert "tool_planned" in step_payloads
 
 
 @pytest.mark.asyncio
@@ -315,6 +378,47 @@ async def test_sales_workflow_streams_event_order_and_final_payload():
     assert "INSERT INTO ai.steps" in fetched_sql
     assert executed_sql.count("INSERT INTO ai.eval_results") == 2
     assert "status = 'completed'" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_streams_small_talk_without_tool_or_llm():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeLLMAdapter(content="No deberia llamarse.")
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-small-talk-stream",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    events = [
+        event
+        async for event in workflow.stream(
+            request=SalesQuestionRequest(question="como estas"),
+            context=context,
+        )
+    ]
+
+    assert [event.event for event in events] == ["run_started", "step_started", "final"]
+    assert gateway.calls == []
+    assert llm.calls == []
+    final_event_name, final_payload = parse_sse_frame(events[-1].to_sse())
+    assert final_event_name == "final"
+    assert final_payload["summary"].startswith("Hola, estoy funcionando.")
+    assert final_payload["artifact_summary"]["intent"] == "small_talk"
 
 
 @pytest.mark.asyncio

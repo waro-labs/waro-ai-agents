@@ -7,11 +7,14 @@ from fastapi.responses import StreamingResponse
 from app.config import get_settings
 from app.database import DatabasePool
 from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
-from app.telemetry import configure_tracing, instrument_app
 from app.streaming import streaming_response
+from app.telemetry import configure_tracing, instrument_app
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
+from app.workflows.agent import AgentWorkflow
 from app.workflows.food_cost import FoodCostWorkflow
 from app.workflows.models import (
+    AgentQuestionRequest,
+    AgentWorkflowResponse,
     FoodCostQuestionRequest,
     FoodCostWorkflowResponse,
     SalesQuestionRequest,
@@ -42,6 +45,10 @@ instrument_app(app, get_settings())  # HTTP generates spans for internal request
 # Factories
 def get_tool_gateway() -> ToolGateway:
     return ToolGateway(settings=get_settings())
+
+
+def get_agent_workflow() -> AgentWorkflow:
+    return AgentWorkflow(settings=get_settings())
 
 
 def get_food_cost_workflow() -> FoodCostWorkflow:
@@ -87,6 +94,28 @@ async def call_tool(
     gateway: ToolGateway = Depends(get_tool_gateway),
 ) -> ToolCallResponse:
     return await gateway.call(request=request, context=context)
+
+
+@app.post(
+    "/internal/ai/messages",
+    response_model=AgentWorkflowResponse,
+    tags=["ai"],
+)
+async def ask_agent(
+    request: AgentQuestionRequest,
+    context: InternalRequestContext = Depends(require_internal_request),
+    workflow: AgentWorkflow = Depends(get_agent_workflow),
+) -> AgentWorkflowResponse:
+    return await workflow.run(request=request, context=context)
+
+
+@app.post("/internal/ai/messages/stream", tags=["ai"])
+async def stream_agent(
+    request: AgentQuestionRequest,
+    context: InternalRequestContext = Depends(require_internal_request),
+    workflow: AgentWorkflow = Depends(get_agent_workflow),
+) -> StreamingResponse:
+    return streaming_response(workflow.stream(request=request, context=context))
 
 
 @app.post(

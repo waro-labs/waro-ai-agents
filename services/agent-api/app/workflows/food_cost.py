@@ -14,6 +14,7 @@ from app.evals.food_cost import evaluate_food_cost_artifact
 from app.llm import LLMAdapter, get_llm_adapter
 from app.llm.prompts import food_cost_summary_messages
 from app.streaming import StreamEvent, stream_event, terminal_error_event
+from app.telemetry import current_trace_ids
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import FoodCostQuestionRequest, FoodCostWorkflowResponse
@@ -213,15 +214,23 @@ class FoodCostWorkflow:
         return graph.compile()
 
     async def _route_food_cost(self, state: FoodCostGraphState) -> FoodCostGraphState:
-        await self._record_step(
-            run_id=state["run_id"],
-            tenant_id=state["context"].tenant_id,
-            step_type="router",
-            name="food_cost_intent_router",
-            input_json={"question_length": len(state["request"].question)},
-            output_json={"intent": "food_cost"},
-            output_summary="Routed request to the food-cost workflow.",
-        )
+        with self.tracer.start_as_current_span("food_cost.route_intent") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(state["run_id"]))
+            span.set_attribute("waro.tenant_id", state["context"].tenant_id)
+            span.set_attribute("waro.food_cost.intent", "food_cost")
+            span.set_attribute("waro.request.question_length", len(state["request"].question))
+            await self._record_step(
+                run_id=state["run_id"],
+                tenant_id=state["context"].tenant_id,
+                step_type="router",
+                name="food_cost_intent_router",
+                input_json={"question_length": len(state["request"].question)},
+                output_json={"intent": "food_cost"},
+                output_summary="Routed request to the food-cost workflow.",
+            )
+            span.set_status(Status(StatusCode.OK))
         return {}
 
     async def _call_food_cost_tools_node(
@@ -237,15 +246,24 @@ class FoodCostWorkflow:
         }
 
     async def _build_artifact_node(self, state: FoodCostGraphState) -> FoodCostGraphState:
-        artifact = self._build_artifact(
-            request=state["request"],
-            tool_calls=state["tool_calls"],
-        )
-        summary = await self._build_summary_with_llm(
-            artifact=artifact,
-            context=state["context"],
-            run_id=state["run_id"],
-        )
+        with self.tracer.start_as_current_span("food_cost.build_artifact") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(state["run_id"]))
+            span.set_attribute("waro.tool.call_count", len(state["tool_calls"]))
+            artifact = self._build_artifact(
+                request=state["request"],
+                tool_calls=state["tool_calls"],
+            )
+            low_margin_products = artifact.get("low_margin_products", [])
+            if isinstance(low_margin_products, list):
+                span.set_attribute("waro.food_cost.low_margin_count", len(low_margin_products))
+            summary = await self._build_summary_with_llm(
+                artifact=artifact,
+                context=state["context"],
+                run_id=state["run_id"],
+            )
+            span.set_status(Status(StatusCode.OK))
         return {
             "artifact": artifact,
             "summary": summary,
@@ -253,15 +271,22 @@ class FoodCostWorkflow:
         }
 
     async def _finish_run_node(self, state: FoodCostGraphState) -> FoodCostGraphState:
-        output_message_id = await self._finish_run(
-            context=state["context"],
-            conversation_id=state["conversation_id"],
-            input_message_id=state["input_message_id"],
-            run_id=state["run_id"],
-            artifact=state["artifact"],
-            summary=state["summary"],
-            evals=state["evals"],
-        )
+        with self.tracer.start_as_current_span("food_cost.finish_run") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(state["run_id"]))
+            span.set_attribute("waro.eval.count", len(state["evals"]))
+            output_message_id = await self._finish_run(
+                context=state["context"],
+                conversation_id=state["conversation_id"],
+                input_message_id=state["input_message_id"],
+                run_id=state["run_id"],
+                artifact=state["artifact"],
+                summary=state["summary"],
+                evals=state["evals"],
+            )
+            span.set_attribute("waro.output_message_id", str(output_message_id))
+            span.set_status(Status(StatusCode.OK))
         return {"output_message_id": output_message_id}
 
     async def _start_run(
@@ -350,6 +375,8 @@ class FoodCostWorkflow:
         output_json: dict[str, Any] | None = None,
         output_summary: str | None = None,
     ) -> UUID:
+        _, span_id = current_trace_ids()
+        step_span_id = span_id if step_type != "tool" else None
         async with self.connection_factory() as connection:
             row = await connection.fetchrow(
                 """
@@ -360,9 +387,10 @@ class FoodCostWorkflow:
                     name,
                     input_json,
                     output_json,
-                    output_summary
+                    output_summary,
+                    span_id
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
                 RETURNING id
                 """,
                 run_id,
@@ -372,6 +400,7 @@ class FoodCostWorkflow:
                 json.dumps(sanitize_value(input_json or {}), default=str),
                 json.dumps(sanitize_value(output_json or {}), default=str),
                 output_summary,
+                step_span_id,
             )
             return row["id"]
 
@@ -486,24 +515,36 @@ class FoodCostWorkflow:
         run_id: UUID,
         tool_name: str,
     ) -> tuple[UUID, dict[str, Any], list[str]]:
-        call = next(
-            (
-                (arguments, fields)
-                for name, arguments, fields in self._required_tool_calls(request)
-                if name == tool_name
-            ),
-            None,
-        )
-        if call is None:
-            raise ValueError(f"Unknown food-cost tool: {tool_name}")
-        arguments, fields = call
-        step_id = await self._record_step(
-            run_id=run_id,
-            tenant_id=context.tenant_id,
-            step_type="tool",
-            name=tool_name,
-            input_json={"arguments": arguments, "fields": fields},
-        )
+        with self.tracer.start_as_current_span("food_cost.plan_tool") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(run_id))
+            span.set_attribute("waro.tenant_id", context.tenant_id)
+            span.set_attribute("waro.tool.name", tool_name)
+            call = next(
+                (
+                    (arguments, fields)
+                    for name, arguments, fields in self._required_tool_calls(request)
+                    if name == tool_name
+                ),
+                None,
+            )
+            if call is None:
+                raise ValueError(f"Unknown food-cost tool: {tool_name}")
+            arguments, fields = call
+            span.set_attribute("waro.resolver.period.date_from", request.date_from or "")
+            span.set_attribute("waro.resolver.period.date_to", request.date_to or "")
+            span.set_attribute("waro.resolver.compare_to", request.compare_to or "")
+            span.set_attribute("waro.tool.fields", ",".join(fields))
+            step_id = await self._record_step(
+                run_id=run_id,
+                tenant_id=context.tenant_id,
+                step_type="tool",
+                name=tool_name,
+                input_json={"arguments": arguments, "fields": fields},
+            )
+            span.set_attribute("waro.step_id", str(step_id))
+            span.set_status(Status(StatusCode.OK))
         return step_id, arguments, fields
 
     def _required_tool_calls(
@@ -891,6 +932,7 @@ class FoodCostWorkflow:
         summary: str,
         evals: list[Any],
     ) -> UUID:
+        _, span_id = current_trace_ids()
         async with self.connection_factory() as connection:
             step_row = await connection.fetchrow(
                 """
@@ -900,15 +942,17 @@ class FoodCostWorkflow:
                     step_type,
                     name,
                     output_json,
-                    output_summary
+                    output_summary,
+                    span_id
                 )
-                VALUES ($1, $2, 'agent', 'food_cost_artifact', $3::jsonb, $4)
+                VALUES ($1, $2, 'agent', 'food_cost_artifact', $3::jsonb, $4, $5)
                 RETURNING id
                 """,
                 run_id,
                 UUID(context.tenant_id),
                 json.dumps(sanitize_value(artifact), default=str),
                 summary,
+                span_id,
             )
             message_row = await connection.fetchrow(
                 """
