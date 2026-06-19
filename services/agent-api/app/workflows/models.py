@@ -39,7 +39,7 @@ class SalesQuestionRequest(BaseModel):
     conversation_id: UUID | None = None
     date_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     date_to: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
-    group_by: Literal["date", "weekday", "hour", "product", "payment", "ticket"] = "date"
+    group_by: Literal["date", "weekday", "hour", "product", "payment", "ticket"] | None = None
 
 
 class SalesWorkflowResponse(BaseModel):
