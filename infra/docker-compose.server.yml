@@ -50,14 +50,27 @@ services:
     profiles:
       - observability
     restart: unless-stopped
+    environment:
+      PHOENIX_ENABLE_AUTH: ${PHOENIX_ENABLE_AUTH:-true}
+      PHOENIX_SECRET: ${PHOENIX_SECRET:?PHOENIX_SECRET is required when Phoenix auth is enabled}
+      PHOENIX_ADMIN_SECRET: ${PHOENIX_ADMIN_SECRET:-}
+      PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD: ${PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD:-}
+      PHOENIX_ENABLE_STRONG_PASSWORD_POLICY: ${PHOENIX_ENABLE_STRONG_PASSWORD_POLICY:-true}
+      PHOENIX_USE_SECURE_COOKIES: ${PHOENIX_USE_SECURE_COOKIES:-true}
+      PHOENIX_ROOT_URL: ${PHOENIX_ROOT_URL:-https://phoenix.warocol.com}
+      PHOENIX_CSRF_TRUSTED_ORIGINS: ${PHOENIX_CSRF_TRUSTED_ORIGINS:-https://phoenix.warocol.com}
+      PHOENIX_SQL_DATABASE_URL: ${PHOENIX_SQL_DATABASE_URL:-sqlite:////data/phoenix.db}
     ports:
       - "127.0.0.1:6006:6006"
       - "127.0.0.1:4317:4317"
+    volumes:
+      - phoenix-data:/data
     networks:
       - waro_ai_internal
 
 volumes:
   redis-data:
+  phoenix-data:
 
 networks:
   waro_ai_internal:

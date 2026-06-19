@@ -3,7 +3,7 @@ import json
 import re
 import unicodedata
 from datetime import date, datetime, timedelta
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -18,9 +18,49 @@ from app.evals.sales import evaluate_sales_artifact
 from app.llm import LLMAdapter, get_llm_adapter
 from app.llm.prompts import sales_summary_messages
 from app.streaming import StreamEvent, stream_event, terminal_error_event
+from app.telemetry import current_trace_ids
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import SalesQuestionRequest, SalesWorkflowResponse
+
+
+SMALL_TALK_PATTERNS = (
+    r"\b(hola|buenas|buenos dias|buenas tardes|buenas noches)\b",
+    r"\b(como estas|que tal|como vas)\b",
+    r"\b(funcionas|estas funcionando|me escuchas)\b",
+    r"\b(gracias|ok|listo)\b",
+)
+
+SALES_SIGNAL_PATTERNS = (
+    r"\bventas?\b",
+    r"\bvend[ií]|vendimos|vendido\b",
+    r"\bingresos?\b",
+    r"\bfactur",
+    r"\border(?:es|nes)?\b",
+    r"\bticket\b",
+    r"\bultim[oa]s?\s+\d{1,3}\s+dias?\b",
+    r"\b(hoy|ayer|este mes|del mes|mes actual|esta semana|semana actual)\b",
+)
+
+SPANISH_NUMBER_WORDS = {
+    "uno": 1,
+    "una": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+    "seis": 6,
+    "siete": 7,
+    "ocho": 8,
+    "nueve": 9,
+    "diez": 10,
+    "once": 11,
+    "doce": 12,
+    "trece": 13,
+    "catorce": 14,
+    "quince": 15,
+    "treinta": 30,
+}
 
 
 class SalesGraphState(TypedDict, total=False):
@@ -29,6 +69,7 @@ class SalesGraphState(TypedDict, total=False):
     conversation_id: UUID
     input_message_id: UUID
     run_id: UUID
+    sales_intent: str
     tool_calls: list[dict[str, Any]]
     artifact: dict[str, Any]
     summary: str
@@ -102,106 +143,128 @@ class SalesWorkflow:
         request: SalesQuestionRequest,
         context: InternalRequestContext,
     ) -> AsyncIterator[StreamEvent]:
-        conversation_id, input_message_id, run_id = await self._start_run(
-            request=request,
-            context=context,
-        )
-        yield stream_event(
-            "run_started",
-            run_id=run_id,
-            data={
-                "workflow": self.graph_name,
-                "agent_name": self.agent_name,
-                "conversation_id": str(conversation_id),
-                "input_message_id": str(input_message_id),
-                "status": "running",
-            },
-        )
-
-        try:
-            yield stream_event(
-                "step_started",
-                run_id=run_id,
-                data={"step_type": "router", "name": "sales_intent_router"},
-            )
-            await self._route_sales(
-                {
-                    "request": request,
-                    "context": context,
-                    "run_id": run_id,
-                }
-            )
-            tool_calls: list[dict[str, Any]] = []
-            async for event in self._stream_required_tools(
+        with self.tracer.start_as_current_span("sales.stream") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.agent.name", self.agent_name)
+            span.set_attribute("waro.tenant_id", context.tenant_id)
+            span.set_attribute("waro.request.question_length", len(request.question))
+            conversation_id, input_message_id, run_id = await self._start_run(
                 request=request,
                 context=context,
-                run_id=run_id,
-                tool_calls=tool_calls,
-            ):
-                yield event
-
-            artifact = self._build_artifact(request=request, tool_calls=tool_calls)
-            if self.settings.llm_provider != "disabled":
-                yield stream_event(
-                    "llm_started",
-                    run_id=run_id,
-                    data={
-                        "provider": self.llm_adapter.provider,
-                        "model": self.settings.kimi_model
-                        if self.settings.llm_provider == "kimi"
-                        else None,
-                    },
-                )
-            summary_holder: dict[str, str] = {}
-            async for event in self._stream_summary_with_llm(
-                artifact=artifact,
-                context=context,
-                run_id=run_id,
-                summary_holder=summary_holder,
-            ):
-                yield event
-            summary = summary_holder["summary"]
-            evals = evaluate_sales_artifact(artifact)
-            output_message_id = await self._finish_run(
-                context=context,
-                conversation_id=conversation_id,
-                input_message_id=input_message_id,
-                run_id=run_id,
-                artifact=artifact,
-                summary=summary,
-                evals=evals,
             )
+            span.set_attribute("waro.run_id", str(run_id))
+            span.set_attribute("waro.conversation_id", str(conversation_id))
             yield stream_event(
-                "final",
+                "run_started",
                 run_id=run_id,
                 data={
-                    "status": "completed",
+                    "workflow": self.graph_name,
+                    "agent_name": self.agent_name,
                     "conversation_id": str(conversation_id),
                     "input_message_id": str(input_message_id),
-                    "output_message_id": str(output_message_id),
-                    "summary": summary,
-                    "artifact_summary": self._stream_artifact_summary(artifact),
-                    "evals": [
-                        {
-                            "evaluator_name": eval_result.evaluator_name,
-                            "score": eval_result.score,
-                            "passed": eval_result.passed,
-                        }
-                        for eval_result in evals
-                    ],
+                    "status": "running",
                 },
             )
-        except Exception as exc:
-            await self._mark_failed(
-                context=context,
-                run_id=run_id,
-                error={"message": str(exc), "type": type(exc).__name__},
-            )
-            yield terminal_error_event(
-                run_id=run_id,
-                error_type=type(exc).__name__,
-                error_message=truncate_text(str(exc), 240),
-            )
+
+            try:
+                yield stream_event(
+                    "step_started",
+                    run_id=run_id,
+                    data={"step_type": "router", "name": "sales_intent_router"},
+                )
+                route_state = await self._route_sales(
+                    {
+                        "request": request,
+                        "context": context,
+                        "run_id": run_id,
+                    }
+                )
+                sales_intent = route_state.get("sales_intent", "sales_metrics")
+                span.set_attribute("waro.sales.intent", sales_intent)
+                tool_calls: list[dict[str, Any]] = []
+                if sales_intent == "sales_metrics":
+                    async for event in self._stream_required_tools(
+                        request=request,
+                        context=context,
+                        run_id=run_id,
+                        tool_calls=tool_calls,
+                    ):
+                        yield event
+
+                artifact = self._build_artifact(
+                    request=request,
+                    tool_calls=tool_calls,
+                    intent=sales_intent,
+                )
+                span.set_attribute("waro.tool.call_count", len(tool_calls))
+                if self.settings.llm_provider != "disabled" and self._should_use_llm(artifact):
+                    yield stream_event(
+                        "llm_started",
+                        run_id=run_id,
+                        data={
+                            "provider": self.llm_adapter.provider,
+                            "model": self.settings.kimi_model
+                            if self.settings.llm_provider == "kimi"
+                            else None,
+                        },
+                    )
+                summary_holder: dict[str, str] = {}
+                async for event in self._stream_summary_with_llm(
+                    artifact=artifact,
+                    context=context,
+                    run_id=run_id,
+                    summary_holder=summary_holder,
+                ):
+                    yield event
+                summary = summary_holder["summary"]
+                evals = evaluate_sales_artifact(artifact)
+                output_message_id = await self._finish_run(
+                    context=context,
+                    conversation_id=conversation_id,
+                    input_message_id=input_message_id,
+                    run_id=run_id,
+                    artifact=artifact,
+                    summary=summary,
+                    evals=evals,
+                )
+                yield stream_event(
+                    "final",
+                    run_id=run_id,
+                    data={
+                        "status": "completed",
+                        "conversation_id": str(conversation_id),
+                        "input_message_id": str(input_message_id),
+                        "output_message_id": str(output_message_id),
+                        "summary": summary,
+                        "artifact_summary": self._stream_artifact_summary(artifact),
+                        "evals": [
+                            {
+                                "evaluator_name": eval_result.evaluator_name,
+                                "score": eval_result.score,
+                                "passed": eval_result.passed,
+                            }
+                            for eval_result in evals
+                        ],
+                    },
+                )
+                span.set_status(Status(StatusCode.OK))
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                await self._mark_failed(
+                    context=context,
+                    run_id=run_id,
+                    error={"message": str(exc), "type": type(exc).__name__},
+                )
+                yield stream_event(
+                    "error",
+                    run_id=run_id,
+                    data={
+                        "error_type": type(exc).__name__,
+                        "message": truncate_text(str(exc), 240),
+                    },
+                )
 
     def _build_graph(self):
         graph = StateGraph(SalesGraphState)
@@ -210,23 +273,48 @@ class SalesWorkflow:
         graph.add_node("build_artifact", self._build_artifact_node)
         graph.add_node("finish_run", self._finish_run_node)
         graph.add_edge(START, "route_sales")
-        graph.add_edge("route_sales", "call_sales_tools")
+        graph.add_conditional_edges(
+            "route_sales",
+            self._next_after_route,
+            {
+                "call_sales_tools": "call_sales_tools",
+                "build_artifact": "build_artifact",
+            },
+        )
         graph.add_edge("call_sales_tools", "build_artifact")
         graph.add_edge("build_artifact", "finish_run")
         graph.add_edge("finish_run", END)
         return graph.compile()
 
     async def _route_sales(self, state: SalesGraphState) -> SalesGraphState:
-        await self._record_step(
-            run_id=state["run_id"],
-            tenant_id=state["context"].tenant_id,
-            step_type="router",
-            name="sales_intent_router",
-            input_json={"question_length": len(state["request"].question)},
-            output_json={"intent": "sales_metrics"},
-            output_summary="Routed request to the sales workflow.",
-        )
-        return {}
+        with self.tracer.start_as_current_span("sales.route_intent") as span:
+            intent = self._resolve_sales_intent(state["request"].question)
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(state["run_id"]))
+            span.set_attribute("waro.tenant_id", state["context"].tenant_id)
+            span.set_attribute("waro.sales.intent", intent)
+            span.set_attribute("waro.sales.tool_planned", intent == "sales_metrics")
+            span.set_attribute("waro.request.question_length", len(state["request"].question))
+            await self._record_step(
+                run_id=state["run_id"],
+                tenant_id=state["context"].tenant_id,
+                step_type="router",
+                name="sales_intent_router",
+                input_json={"question_length": len(state["request"].question)},
+                output_json={
+                    "intent": intent,
+                    "tool_planned": intent == "sales_metrics",
+                },
+                output_summary=f"Routed request to {intent}.",
+            )
+            span.set_status(Status(StatusCode.OK))
+        return {"sales_intent": intent}
+
+    def _next_after_route(self, state: SalesGraphState) -> str:
+        if state.get("sales_intent") == "sales_metrics":
+            return "call_sales_tools"
+        return "build_artifact"
 
     async def _call_sales_tools_node(self, state: SalesGraphState) -> SalesGraphState:
         return {
@@ -238,15 +326,30 @@ class SalesWorkflow:
         }
 
     async def _build_artifact_node(self, state: SalesGraphState) -> SalesGraphState:
-        artifact = self._build_artifact(
-            request=state["request"],
-            tool_calls=state["tool_calls"],
-        )
-        summary = await self._build_summary_with_llm(
-            artifact=artifact,
-            context=state["context"],
-            run_id=state["run_id"],
-        )
+        with self.tracer.start_as_current_span("sales.build_artifact") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(state["run_id"]))
+            tool_calls = state.get("tool_calls", [])
+            intent = state.get("sales_intent", "sales_metrics")
+            span.set_attribute("waro.sales.intent", intent)
+            span.set_attribute("waro.tool.call_count", len(tool_calls))
+            artifact = self._build_artifact(
+                request=state["request"],
+                tool_calls=tool_calls,
+                intent=intent,
+            )
+            metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
+            if metrics.get("total_sales") is not None:
+                span.set_attribute("waro.sales.total_sales", metrics["total_sales"])
+            if metrics.get("order_count") is not None:
+                span.set_attribute("waro.sales.order_count", metrics["order_count"])
+            summary = await self._build_summary_with_llm(
+                artifact=artifact,
+                context=state["context"],
+                run_id=state["run_id"],
+            )
+            span.set_status(Status(StatusCode.OK))
         return {
             "artifact": artifact,
             "summary": summary,
@@ -254,15 +357,22 @@ class SalesWorkflow:
         }
 
     async def _finish_run_node(self, state: SalesGraphState) -> SalesGraphState:
-        output_message_id = await self._finish_run(
-            context=state["context"],
-            conversation_id=state["conversation_id"],
-            input_message_id=state["input_message_id"],
-            run_id=state["run_id"],
-            artifact=state["artifact"],
-            summary=state["summary"],
-            evals=state["evals"],
-        )
+        with self.tracer.start_as_current_span("sales.finish_run") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(state["run_id"]))
+            span.set_attribute("waro.eval.count", len(state["evals"]))
+            output_message_id = await self._finish_run(
+                context=state["context"],
+                conversation_id=state["conversation_id"],
+                input_message_id=state["input_message_id"],
+                run_id=state["run_id"],
+                artifact=state["artifact"],
+                summary=state["summary"],
+                evals=state["evals"],
+            )
+            span.set_attribute("waro.output_message_id", str(output_message_id))
+            span.set_status(Status(StatusCode.OK))
         return {"output_message_id": output_message_id}
 
     async def _start_run(
@@ -271,6 +381,7 @@ class SalesWorkflow:
         request: SalesQuestionRequest,
         context: InternalRequestContext,
     ) -> tuple[UUID, UUID, UUID]:
+        trace_id, _ = current_trace_ids()
         async with self.connection_factory() as connection:
             conversation_id = request.conversation_id
             if conversation_id is None:
@@ -317,16 +428,18 @@ class SalesWorkflow:
                     conversation_id,
                     tenant_id,
                     input_message_id,
+                    trace_id,
                     agent_name,
                     graph_name,
                     status
                 )
-                VALUES ($1, $2, $3, $4, $5, 'running')
+                VALUES ($1, $2, $3, $4, $5, $6, 'running')
                 RETURNING id
                 """,
                 conversation_id,
                 UUID(context.tenant_id),
                 message_row["id"],
+                trace_id,
                 self.agent_name,
                 self.graph_name,
             )
@@ -351,6 +464,8 @@ class SalesWorkflow:
         output_json: dict[str, Any] | None = None,
         output_summary: str | None = None,
     ) -> UUID:
+        _, span_id = current_trace_ids()
+        step_span_id = span_id if step_type != "tool" else None
         async with self.connection_factory() as connection:
             row = await connection.fetchrow(
                 """
@@ -361,9 +476,10 @@ class SalesWorkflow:
                     name,
                     input_json,
                     output_json,
-                    output_summary
+                    output_summary,
+                    span_id
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
                 RETURNING id
                 """,
                 run_id,
@@ -373,6 +489,7 @@ class SalesWorkflow:
                 json.dumps(sanitize_value(input_json or {}), default=str),
                 json.dumps(sanitize_value(output_json or {}), default=str),
                 output_summary,
+                step_span_id,
             )
             return row["id"]
 
@@ -470,21 +587,33 @@ class SalesWorkflow:
         context: InternalRequestContext,
         run_id: UUID,
     ) -> tuple[UUID, dict[str, Any], list[str]]:
-        period = self._resolve_period(request)
-        arguments = {
-            "date-from": period["date_from"],
-            "date-to": period["date_to"],
-        }
-        if request.group_by:
-            arguments["group-by"] = request.group_by
-        fields = ["data", "meta", "success"]
-        step_id = await self._record_step(
-            run_id=run_id,
-            tenant_id=context.tenant_id,
-            step_type="tool",
-            name="waro.sales.metrics",
-            input_json={"arguments": arguments, "fields": fields},
-        )
+        with self.tracer.start_as_current_span("sales.plan_metrics_tool") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("waro.workflow.name", self.graph_name)
+            span.set_attribute("waro.run_id", str(run_id))
+            span.set_attribute("waro.tenant_id", context.tenant_id)
+            period = self._resolve_period(request)
+            arguments = {
+                "date-from": period["date_from"],
+                "date-to": period["date_to"],
+            }
+            if request.group_by:
+                arguments["group-by"] = request.group_by
+            fields = ["data", "meta", "success"]
+            span.set_attribute("waro.resolver.period.date_from", period["date_from"])
+            span.set_attribute("waro.resolver.period.date_to", period["date_to"])
+            span.set_attribute("waro.sales.group_by", request.group_by or "")
+            span.set_attribute("waro.tool.name", "waro.sales.metrics")
+            span.set_attribute("waro.tool.fields", ",".join(fields))
+            step_id = await self._record_step(
+                run_id=run_id,
+                tenant_id=context.tenant_id,
+                step_type="tool",
+                name="waro.sales.metrics",
+                input_json={"arguments": arguments, "fields": fields},
+            )
+            span.set_attribute("waro.step_id", str(step_id))
+            span.set_status(Status(StatusCode.OK))
         return step_id, arguments, fields
 
     def _tool_call_record(self, response: ToolCallResponse) -> dict[str, Any]:
@@ -502,7 +631,18 @@ class SalesWorkflow:
         *,
         request: SalesQuestionRequest,
         tool_calls: list[dict[str, Any]],
+        intent: str = "sales_metrics",
     ) -> dict[str, Any]:
+        if intent == "small_talk":
+            return {
+                "intent": "small_talk",
+                "period": None,
+                "metrics": {},
+                "highlights": ["Small talk handled without querying sales metrics."],
+                "explanation": "Sales metrics were not queried because the message was conversational.",
+                "tool_calls": [],
+            }
+
         period = self._resolve_period(request)
         metric_data = self._metrics_data_for(tool_calls, "waro.sales.metrics")
         metrics = sanitize_value(
@@ -517,6 +657,7 @@ class SalesWorkflow:
         )
         highlights = self._highlights(metrics)
         return {
+            "intent": "sales_metrics",
             "period": period,
             "metrics": metrics,
             "highlights": highlights,
@@ -536,6 +677,7 @@ class SalesWorkflow:
     def _stream_artifact_summary(self, artifact: dict[str, Any]) -> dict[str, Any]:
         metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
         return {
+            "intent": artifact.get("intent"),
             "period": artifact.get("period"),
             "metrics": {
                 "total_sales": metrics.get("total_sales"),
@@ -561,6 +703,18 @@ class SalesWorkflow:
             value = error.get("type") or error.get("error") or error.get("code")
             return str(value) if value else "tool_error"
         return type(error).__name__
+
+    def _resolve_sales_intent(self, question: str) -> Literal["sales_metrics", "small_talk"]:
+        normalized = self._normalize_question(question)
+        if self._is_small_talk(normalized) and not self._has_sales_signal(normalized):
+            return "small_talk"
+        return "sales_metrics"
+
+    def _is_small_talk(self, normalized: str) -> bool:
+        return any(re.search(pattern, normalized) for pattern in SMALL_TALK_PATTERNS)
+
+    def _has_sales_signal(self, normalized: str) -> bool:
+        return any(re.search(pattern, normalized) for pattern in SALES_SIGNAL_PATTERNS)
 
     def _resolve_period(self, request: SalesQuestionRequest) -> dict[str, str]:
         if request.date_from and request.date_to:
@@ -599,9 +753,25 @@ class SalesWorkflow:
         if re.search(r"\b(esta semana|semana actual)\b", normalized):
             start = today - timedelta(days=today.weekday())
             return {"date_from": start.isoformat(), "date_to": today.isoformat()}
-        if re.search(r"\b(ultimos 7 dias|ultimos siete dias)\b", normalized):
-            start = today - timedelta(days=6)
+        last_days = self._last_days_count(normalized)
+        if last_days:
+            start = today - timedelta(days=last_days - 1)
             return {"date_from": start.isoformat(), "date_to": today.isoformat()}
+        return None
+
+    def _last_days_count(self, normalized: str) -> int | None:
+        match = re.search(
+            r"\b(?:los\s+|las\s+)?ultim[oa]s?\s+(?P<count>\d{1,3}|"
+            r"uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|treinta"
+            r")\s+dias?\b",
+            normalized,
+        )
+        if not match:
+            return None
+        count_text = match.group("count")
+        count = SPANISH_NUMBER_WORDS.get(count_text, int(count_text) if count_text.isdigit() else 0)
+        if 1 <= count <= 90:
+            return count
         return None
 
     def _explicit_date_from_question(self, normalized: str, *, today: date) -> date | None:
@@ -715,6 +885,11 @@ class SalesWorkflow:
         return highlights or ["No sales metrics were returned for the selected period."]
 
     def _build_summary(self, artifact: dict[str, Any]) -> str:
+        if artifact.get("intent") == "small_talk":
+            return (
+                "Hola, estoy funcionando. Puedes preguntarme por ventas, por ejemplo: "
+                "dame las ventas de ayer o dime las ventas de los ultimos 15 dias."
+            )
         metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
         total_sales = metrics.get("total_sales")
         avg_ticket = metrics.get("avg_ticket")
@@ -727,6 +902,9 @@ class SalesWorkflow:
             parts.append(f"average ticket {avg_ticket}")
         return "Sales workflow completed with " + " and ".join(parts) + "."
 
+    def _should_use_llm(self, artifact: dict[str, Any]) -> bool:
+        return artifact.get("intent") != "small_talk"
+
     async def _build_summary_with_llm(
         self,
         *,
@@ -735,7 +913,7 @@ class SalesWorkflow:
         run_id: UUID,
     ) -> str:
         fallback_summary = self._build_summary(artifact)
-        if self.settings.llm_provider == "disabled":
+        if self.settings.llm_provider == "disabled" or not self._should_use_llm(artifact):
             return fallback_summary
 
         with self.tracer.start_as_current_span("llm.sales.summary") as span:
@@ -827,8 +1005,13 @@ class SalesWorkflow:
         run_id: UUID,
         summary_holder: dict[str, str],
     ) -> AsyncIterator[StreamEvent]:
+        fallback_summary = self._build_summary(artifact)
+        if self.settings.llm_provider == "disabled" or not self._should_use_llm(artifact):
+            summary_holder["summary"] = fallback_summary
+            return
+
         stream_complete = getattr(self.llm_adapter, "stream_complete", None)
-        if self.settings.llm_provider == "disabled" or stream_complete is None:
+        if stream_complete is None:
             summary_holder["summary"] = await self._build_summary_with_llm(
                 artifact=artifact,
                 context=context,
@@ -836,7 +1019,6 @@ class SalesWorkflow:
             )
             return
 
-        fallback_summary = self._build_summary(artifact)
         with self.tracer.start_as_current_span("llm.sales.summary") as span:
             span.set_attribute("openinference.span.kind", "LLM")
             span.set_attribute("llm.provider", self.llm_adapter.provider)
@@ -947,6 +1129,7 @@ class SalesWorkflow:
         summary: str,
         evals: list[Any],
     ) -> UUID:
+        _, span_id = current_trace_ids()
         async with self.connection_factory() as connection:
             step_row = await connection.fetchrow(
                 """
@@ -956,15 +1139,17 @@ class SalesWorkflow:
                     step_type,
                     name,
                     output_json,
-                    output_summary
+                    output_summary,
+                    span_id
                 )
-                VALUES ($1, $2, 'agent', 'sales_artifact', $3::jsonb, $4)
+                VALUES ($1, $2, 'agent', 'sales_artifact', $3::jsonb, $4, $5)
                 RETURNING id
                 """,
                 run_id,
                 UUID(context.tenant_id),
                 json.dumps(sanitize_value(artifact), default=str),
                 summary,
+                span_id,
             )
             message_row = await connection.fetchrow(
                 """

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         default="http://phoenix:4317",
         alias="PHOENIX_COLLECTOR_ENDPOINT",
     )
+    phoenix_api_key: str | None = Field(default=None, alias="PHOENIX_API_KEY")
     otel_service_name: str = Field(default="waro-ai-agents", alias="OTEL_SERVICE_NAME")
     otel_enabled: bool = Field(default=True, alias="OTEL_ENABLED")
     otel_export_timeout_seconds: int = Field(
