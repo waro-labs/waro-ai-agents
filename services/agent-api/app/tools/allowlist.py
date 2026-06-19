@@ -160,9 +160,20 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         command=("sales", "metrics"),
         scope="orders:read",
         args_model=SalesMetricsArgs,
-        default_fields=("totalSales", "orderCount", "avgTicket", "series"),
+        default_fields=("data", "meta", "success"),
         allowed_fields=frozenset(
-            {"totalSales", "orderCount", "avgTicket", "series", "products", "payment_methods"}
+            {
+                "data",
+                "meta",
+                "success",
+                "totalSales",
+                "totalOrders",
+                "orderCount",
+                "avgTicket",
+                "series",
+                "products",
+                "payment_methods",
+            }
         ),
     ),
     "waro.sales.detail": ToolSpec(

@@ -58,6 +58,17 @@ def test_fields_are_required_or_defaulted_and_limited():
         resolve_fields(spec, ["id", "customer_email"])
 
 
+def test_sales_metrics_defaults_to_cli_envelope_fields():
+    spec = get_tool_spec("waro.sales.metrics")
+
+    assert resolve_fields(spec, None) == ("data", "meta", "success")
+    assert resolve_fields(spec, ["totalSales", "totalOrders", "avgTicket"]) == (
+        "totalSales",
+        "totalOrders",
+        "avgTicket",
+    )
+
+
 def test_args_reject_extra_flags_and_build_typed_cli_args():
     spec = get_tool_spec("waro.menu.products")
 
@@ -232,8 +243,8 @@ async def test_gateway_persists_sanitized_success():
     assert response.status == "succeeded"
     assert response.tool_call_id == connection.tool_call_id
     assert len(connection.fetches) == 1
-    assert len(connection.executes) == 4
-    assert "UPDATE ai.runs" in connection.executes[0][0]
+    executed_sql = "\n".join(query for query, _ in connection.executes)
+    assert "INSERT INTO audit.ai_action_events" in executed_sql
     insert_args = connection.fetches[0][1]
     assert "WARO_API_KEY" not in str(insert_args)
     assert '"fields": ["id", "name"]' in insert_args[4]
@@ -276,8 +287,8 @@ async def test_gateway_persists_sanitized_error():
 
     assert response.status == "failed"
     assert "super-secret-key" not in str(response.error)
-    assert len(connection.executes) == 4
-    assert "UPDATE ai.runs" in connection.executes[0][0]
+    executed_sql = "\n".join(query for query, _ in connection.executes)
+    assert "INSERT INTO audit.ai_action_events" in executed_sql
 
 
 @pytest.mark.asyncio

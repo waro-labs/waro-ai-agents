@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import datetime as real_datetime
 import json
 from uuid import UUID, uuid4
 
@@ -46,17 +47,16 @@ class FakeGateway:
             tool_name=request.tool_name,
             status="succeeded",
             result={
-                "data": [
-                    {
-                        "totalSales": 431500.0,
-                        "orderCount": 14,
-                        "avgTicket": 30821.428571428572,
-                        "series": [{"date": "2026-06-17", "totalSales": 431500.0}],
-                    }
-                ],
+                "data": {
+                    "totalSales": 431500.0,
+                    "totalOrders": 14,
+                    "avgTicket": 30821.428571428572,
+                    "series": [{"date": "2026-06-17", "totalSales": 431500.0}],
+                },
+                "meta": {"dateFrom": "2026-06-17", "dateTo": "2026-06-17"},
                 "success": True,
             },
-            result_summary="Returned 1 rows.",
+            result_summary="Returned sales metrics.",
         )
 
 
@@ -102,6 +102,40 @@ class FakeStreamingLLMAdapter(FakeLLMAdapter):
         )
 
 
+class FixedDateTime(real_datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 6, 19, 10, 30, tzinfo=tz)
+
+
+def test_sales_workflow_resolves_relative_periods_from_question(monkeypatch):
+    monkeypatch.setattr("app.workflows.sales.datetime", FixedDateTime)
+    workflow = SalesWorkflow(settings=Settings())
+
+    assert workflow._resolve_period(
+        SalesQuestionRequest(question="dame las ventas de ayer")
+    ) == {"date_from": "2026-06-18", "date_to": "2026-06-18"}
+    assert workflow._resolve_period(
+        SalesQuestionRequest(question="dame las ventas del mes")
+    ) == {"date_from": "2026-06-01", "date_to": "2026-06-19"}
+    assert workflow._resolve_period(
+        SalesQuestionRequest(question="dame las ventas de los ultimos 7 dias")
+    ) == {"date_from": "2026-06-13", "date_to": "2026-06-19"}
+
+
+def test_sales_workflow_keeps_explicit_dates_ahead_of_question(monkeypatch):
+    monkeypatch.setattr("app.workflows.sales.datetime", FixedDateTime)
+    workflow = SalesWorkflow(settings=Settings())
+
+    assert workflow._resolve_period(
+        SalesQuestionRequest(
+            question="dame las ventas del mes",
+            date_from="2026-05-01",
+            date_to="2026-05-31",
+        )
+    ) == {"date_from": "2026-05-01", "date_to": "2026-05-31"}
+
+
 @pytest.mark.asyncio
 async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
     connection = FakeConnection()
@@ -141,7 +175,7 @@ async def test_sales_workflow_persists_run_tools_message_summary_and_evals():
         "date-to": "2026-06-17",
         "group-by": "date",
     }
-    assert gateway.calls[0].fields == ["totalSales", "orderCount", "avgTicket", "series"]
+    assert gateway.calls[0].fields == ["data", "meta", "success"]
     assert response.artifact["metrics"]["total_sales"] == 431500.0
     assert response.artifact["metrics"]["order_count"] == 14
     assert response.artifact["metrics"]["avg_ticket"] == 30821.428571428572
@@ -203,7 +237,7 @@ async def test_sales_workflow_uses_llm_summary_when_enabled():
     assert response.summary == "Ayer vendiste $431.500 con ticket promedio de $30.821."
     assert len(llm.calls) == 1
     assert llm.calls[0][0].role == "system"
-    assert "analista de ventas" in llm.calls[0][0].content
+    assert "analista senior de ventas" in llm.calls[0][0].content
     fetched_sql = "\n".join(query for query, _ in connection.fetches)
     assert "sales_summary" in str(connection.fetches)
     assert "INSERT INTO ai.steps" in fetched_sql
