@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 import json
 from typing import Any, TypedDict
 from uuid import UUID
@@ -12,7 +13,8 @@ from app.dependencies.internal_auth import InternalRequestContext
 from app.evals.food_cost import evaluate_food_cost_artifact
 from app.llm import LLMAdapter, get_llm_adapter
 from app.llm.prompts import food_cost_summary_messages
-from app.tools import ToolCallRequest, ToolGateway
+from app.streaming import StreamEvent, stream_event, terminal_error_event
+from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import FoodCostQuestionRequest, FoodCostWorkflowResponse
 
@@ -89,6 +91,109 @@ class FoodCostWorkflow:
                 error={"message": str(exc), "type": type(exc).__name__},
             )
             raise
+
+    async def stream(
+        self,
+        *,
+        request: FoodCostQuestionRequest,
+        context: InternalRequestContext,
+    ) -> AsyncIterator[StreamEvent]:
+        conversation_id, input_message_id, run_id = await self._start_run(
+            request=request,
+            context=context,
+        )
+        yield stream_event(
+            "run_started",
+            run_id=run_id,
+            data={
+                "workflow": self.graph_name,
+                "agent_name": self.agent_name,
+                "conversation_id": str(conversation_id),
+                "input_message_id": str(input_message_id),
+                "status": "running",
+            },
+        )
+
+        try:
+            yield stream_event(
+                "step_started",
+                run_id=run_id,
+                data={"step_type": "router", "name": "food_cost_intent_router"},
+            )
+            await self._route_food_cost(
+                {
+                    "request": request,
+                    "context": context,
+                    "run_id": run_id,
+                }
+            )
+            tool_calls: list[dict[str, Any]] = []
+            async for event in self._stream_required_tools(
+                request=request,
+                context=context,
+                run_id=run_id,
+                tool_calls=tool_calls,
+            ):
+                yield event
+
+            artifact = self._build_artifact(request=request, tool_calls=tool_calls)
+            if self.settings.llm_provider != "disabled":
+                yield stream_event(
+                    "llm_started",
+                    run_id=run_id,
+                    data={
+                        "provider": self.llm_adapter.provider,
+                        "model": self.settings.kimi_model
+                        if self.settings.llm_provider == "kimi"
+                        else None,
+                    },
+                )
+            summary = await self._build_summary_with_llm(
+                artifact=artifact,
+                context=context,
+                run_id=run_id,
+            )
+            evals = evaluate_food_cost_artifact(artifact)
+            output_message_id = await self._finish_run(
+                context=context,
+                conversation_id=conversation_id,
+                input_message_id=input_message_id,
+                run_id=run_id,
+                artifact=artifact,
+                summary=summary,
+                evals=evals,
+            )
+            yield stream_event(
+                "final",
+                run_id=run_id,
+                data={
+                    "status": "completed",
+                    "conversation_id": str(conversation_id),
+                    "input_message_id": str(input_message_id),
+                    "output_message_id": str(output_message_id),
+                    "summary": summary,
+                    "artifact_summary": self._stream_artifact_summary(artifact),
+                    "evals": [
+                        {
+                            "evaluator_name": eval_result.evaluator_name,
+                            "score": eval_result.score,
+                            "passed": eval_result.passed,
+                        }
+                        for eval_result in evals
+                    ],
+                },
+            )
+        except Exception as exc:
+            await self._mark_failed(
+                context=context,
+                run_id=run_id,
+                error={"message": str(exc), "type": type(exc).__name__},
+            )
+            yield terminal_error_event(
+                run_id=run_id,
+                error_type=type(exc).__name__,
+                error_message=truncate_text(str(exc), 240),
+            )
 
     def _build_graph(self):
         graph = StateGraph(FoodCostGraphState)
@@ -273,6 +378,134 @@ class FoodCostWorkflow:
         context: InternalRequestContext,
         run_id: UUID,
     ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for index, (tool_name, _, _) in enumerate(
+            self._required_tool_calls(request),
+            start=1,
+        ):
+            _, response = await self._call_food_cost_tool(
+                request=request,
+                context=context,
+                run_id=run_id,
+                index=index,
+                tool_name=tool_name,
+            )
+            results.append(self._tool_call_record(response))
+        return results
+
+    async def _stream_required_tools(
+        self,
+        *,
+        request: FoodCostQuestionRequest,
+        context: InternalRequestContext,
+        run_id: UUID,
+        tool_calls: list[dict[str, Any]],
+    ) -> AsyncIterator[StreamEvent]:
+        for index, (tool_name, _, _) in enumerate(
+            self._required_tool_calls(request),
+            start=1,
+        ):
+            step_id, arguments, fields = await self._prepare_food_cost_call(
+                request=request,
+                context=context,
+                run_id=run_id,
+                tool_name=tool_name,
+            )
+            yield stream_event(
+                "tool_started",
+                run_id=run_id,
+                data={
+                    "step_id": str(step_id),
+                    "tool_name": tool_name,
+                },
+            )
+            response = await self.gateway.call(
+                request=ToolCallRequest(
+                    run_id=run_id,
+                    step_id=step_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    fields=fields,
+                    idempotency_key=f"{run_id}:{index}:{tool_name}",
+                ),
+                context=context,
+            )
+            tool_calls.append(self._tool_call_record(response))
+            yield stream_event(
+                "tool_finished",
+                run_id=run_id,
+                data={
+                    "step_id": str(step_id),
+                    "tool_name": response.tool_name,
+                    "status": response.status,
+                    "tool_call_id": str(response.tool_call_id)
+                    if response.tool_call_id
+                    else None,
+                    "result_summary": response.result_summary,
+                    "error_type": self._stream_error_type(response.error),
+                },
+            )
+
+    async def _call_food_cost_tool(
+        self,
+        *,
+        request: FoodCostQuestionRequest,
+        context: InternalRequestContext,
+        run_id: UUID,
+        index: int,
+        tool_name: str,
+    ) -> tuple[UUID, ToolCallResponse]:
+        step_id, arguments, fields = await self._prepare_food_cost_call(
+            request=request,
+            context=context,
+            run_id=run_id,
+            tool_name=tool_name,
+        )
+        response = await self.gateway.call(
+            request=ToolCallRequest(
+                run_id=run_id,
+                step_id=step_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                fields=fields,
+                idempotency_key=f"{run_id}:{index}:{tool_name}",
+            ),
+            context=context,
+        )
+        return step_id, response
+
+    async def _prepare_food_cost_call(
+        self,
+        *,
+        request: FoodCostQuestionRequest,
+        context: InternalRequestContext,
+        run_id: UUID,
+        tool_name: str,
+    ) -> tuple[UUID, dict[str, Any], list[str]]:
+        call = next(
+            (
+                (arguments, fields)
+                for name, arguments, fields in self._required_tool_calls(request)
+                if name == tool_name
+            ),
+            None,
+        )
+        if call is None:
+            raise ValueError(f"Unknown food-cost tool: {tool_name}")
+        arguments, fields = call
+        step_id = await self._record_step(
+            run_id=run_id,
+            tenant_id=context.tenant_id,
+            step_type="tool",
+            name=tool_name,
+            input_json={"arguments": arguments, "fields": fields},
+        )
+        return step_id, arguments, fields
+
+    def _required_tool_calls(
+        self,
+        request: FoodCostQuestionRequest,
+    ) -> list[tuple[str, dict[str, Any], list[str]]]:
         period_args = {
             key: value
             for key, value in {
@@ -282,7 +515,7 @@ class FoodCostWorkflow:
             }.items()
             if value is not None
         }
-        calls = [
+        return [
             (
                 "waro.analytics.food_cost",
                 period_args,
@@ -299,37 +532,16 @@ class FoodCostWorkflow:
                 ["id", "name", "margin", "revenue", "cost", "quantity"],
             ),
         ]
-        results: list[dict[str, Any]] = []
-        for index, (tool_name, arguments, fields) in enumerate(calls, start=1):
-            step_id = await self._record_step(
-                run_id=run_id,
-                tenant_id=context.tenant_id,
-                step_type="tool",
-                name=tool_name,
-                input_json={"arguments": arguments, "fields": fields},
-            )
-            response = await self.gateway.call(
-                request=ToolCallRequest(
-                    run_id=run_id,
-                    step_id=step_id,
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    fields=fields,
-                    idempotency_key=f"{run_id}:{index}:{tool_name}",
-                ),
-                context=context,
-            )
-            results.append(
-                {
-                    "tool_name": response.tool_name,
-                    "status": response.status,
-                    "tool_call_id": str(response.tool_call_id) if response.tool_call_id else None,
-                    "result": sanitize_value(response.result),
-                    "result_summary": response.result_summary,
-                    "error": sanitize_value(response.error),
-                }
-            )
-        return results
+
+    def _tool_call_record(self, response: ToolCallResponse) -> dict[str, Any]:
+        return {
+            "tool_name": response.tool_name,
+            "status": response.status,
+            "tool_call_id": str(response.tool_call_id) if response.tool_call_id else None,
+            "result": sanitize_value(response.result),
+            "result_summary": response.result_summary,
+            "error": sanitize_value(response.error),
+        }
 
     def _build_artifact(
         self,
@@ -379,6 +591,31 @@ class FoodCostWorkflow:
                 for call in tool_calls
             ],
         }
+
+    def _stream_artifact_summary(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "period": artifact.get("period"),
+            "low_margin_products": artifact.get("low_margin_products", []),
+            "recommendations": artifact.get("recommendations", []),
+            "tool_calls": [
+                {
+                    "tool_name": call.get("tool_name"),
+                    "status": call.get("status"),
+                    "tool_call_id": call.get("tool_call_id"),
+                    "result_summary": call.get("result_summary"),
+                }
+                for call in artifact.get("tool_calls", [])
+                if isinstance(call, dict)
+            ],
+        }
+
+    def _stream_error_type(self, error: Any) -> str | None:
+        if not error:
+            return None
+        if isinstance(error, dict):
+            value = error.get("type") or error.get("error") or error.get("code")
+            return str(value) if value else "tool_error"
+        return type(error).__name__
 
     def _rows_for(self, tool_calls: list[dict[str, Any]], tool_name: str) -> list[dict[str, Any]]:
         for call in tool_calls:
