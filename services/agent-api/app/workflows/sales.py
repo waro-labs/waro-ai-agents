@@ -1306,23 +1306,49 @@ class SalesWorkflow:
             result = call.get("result")
             if isinstance(result, dict) and isinstance(result.get("data"), list):
                 return [row for row in result["data"] if isinstance(row, dict)]
+            if isinstance(result, dict) and isinstance(result.get("products"), list):
+                return [row for row in result["products"] if isinstance(row, dict)]
             if isinstance(result, list):
                 return [row for row in result if isinstance(row, dict)]
         return []
 
+    def _result_for(
+        self,
+        tool_calls: list[dict[str, Any]],
+        tool_name: str,
+    ) -> dict[str, Any]:
+        for call in tool_calls:
+            if call["tool_name"] != tool_name or call["status"] != "succeeded":
+                continue
+            result = call.get("result")
+            if isinstance(result, dict):
+                return result
+        return {}
+
     def _auxiliary_context(self, tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
         financial_rows = self._rows_for(tool_calls, "waro.financial.products")
+        financial_result = self._result_for(tool_calls, "waro.financial.products")
         menu_rows = self._rows_for(tool_calls, "waro.menu.products")
         context: dict[str, Any] = {}
+        if financial_result:
+            context["financial_metrics"] = sanitize_value(financial_result.get("metrics", {}))
+            context["financial_insights"] = sanitize_value(financial_result.get("insights", {}))
         if financial_rows:
             context["financial_products"] = [
                 {
                     "id": row.get("id"),
                     "name": row.get("name"),
                     "margin": row.get("margin"),
-                    "revenue": row.get("revenue"),
+                    "revenue": row.get("revenue")
+                    if row.get("revenue") is not None
+                    else row.get("total_revenue"),
                     "cost": row.get("cost"),
-                    "quantity": row.get("quantity"),
+                    "quantity": row.get("quantity")
+                    if row.get("quantity") is not None
+                    else row.get("sales"),
+                    "profit": row.get("profit"),
+                    "price": row.get("price"),
+                    "classification": row.get("classification"),
                 }
                 for row in financial_rows[:10]
             ]

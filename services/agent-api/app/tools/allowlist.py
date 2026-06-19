@@ -217,8 +217,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         command=("financial", "products"),
         scope="financial:read",
         args_model=FinancialProductsArgs,
-        default_fields=("id", "name", "margin", "revenue", "cost"),
-        allowed_fields=frozenset({"id", "name", "margin", "revenue", "cost", "quantity"}),
+        default_fields=("products", "metrics", "insights"),
+        allowed_fields=frozenset(
+            {"products", "metrics", "insights", "filters", "categories"}
+        ),
         domain="financial",
         description="Rank products by margin, revenue, cost, or quantity over a period.",
         tags=("financial", "products", "margin", "revenue", "cost", "quantity"),

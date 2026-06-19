@@ -53,14 +53,23 @@ class FakeGateway:
                 tool_name=request.tool_name,
                 status="succeeded",
                 result={
-                    "data": [
+                    "metrics": {
+                        "total_profit": 435200,
+                        "total_revenue": 1088000,
+                    },
+                    "insights": {
+                        "optimization_needed": {"count": 1},
+                    },
+                    "products": [
                         {
                             "id": "p1",
                             "name": "Burger",
                             "margin": 0.24,
-                            "revenue": 180000,
+                            "total_revenue": 180000,
                             "cost": 136800,
-                            "quantity": 8,
+                            "sales": 8,
+                            "profit": 43200,
+                            "classification": "Low Performance",
                         }
                     ],
                     "meta": {"period": request.arguments.get("period")},
@@ -416,6 +425,7 @@ async def test_sales_workflow_plans_auxiliary_financial_tool_for_product_context
     ]
     assert gateway.calls[0].arguments["group-by"] == "product"
     assert gateway.calls[1].arguments == {"sort-by": "margin", "period": 19}
+    assert gateway.calls[1].fields == ["products", "metrics", "insights"]
     assert response.artifact["tool_plan"]["strategy"] == "catalog_sales_planner_v1"
     assert response.artifact["tool_plan"]["steps"][1]["tool_name"] == (
         "waro.financial.products"
@@ -423,6 +433,8 @@ async def test_sales_workflow_plans_auxiliary_financial_tool_for_product_context
     assert response.artifact["auxiliary_context"]["financial_products"][0]["name"] == (
         "Burger"
     )
+    assert response.artifact["auxiliary_context"]["financial_products"][0]["revenue"] == 180000
+    assert response.artifact["auxiliary_context"]["financial_products"][0]["quantity"] == 8
 
     step_payloads = " ".join(
         str(args)
@@ -470,9 +482,11 @@ async def test_sales_workflow_plans_financial_tool_for_financial_analysis():
         "waro.financial.products",
     ]
     assert gateway.calls[1].arguments == {"sort-by": "margin", "period": 19}
+    assert gateway.calls[1].fields == ["products", "metrics", "insights"]
     assert response.artifact["auxiliary_context"]["financial_products"][0]["name"] == (
         "Burger"
     )
+    assert response.artifact["auxiliary_context"]["financial_metrics"]["total_profit"] == 435200
 
 
 @pytest.mark.asyncio

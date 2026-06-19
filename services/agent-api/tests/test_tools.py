@@ -71,6 +71,13 @@ def test_sales_metrics_defaults_to_cli_envelope_fields():
     )
 
 
+def test_financial_products_defaults_to_top_level_sections():
+    spec = get_tool_spec("waro.financial.products")
+
+    assert resolve_fields(spec, None) == ("products", "metrics", "insights")
+    assert resolve_fields(spec, ["products", "metrics"]) == ("products", "metrics")
+
+
 def test_tool_catalog_exposes_auditable_tool_metadata():
     catalog = tool_catalog()
     sales_metrics = next(tool for tool in catalog if tool["name"] == "waro.sales.metrics")

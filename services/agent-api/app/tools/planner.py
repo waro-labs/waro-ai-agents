@@ -87,7 +87,7 @@ class ToolPlanner:
                         "sort-by": self._financial_sort(normalized),
                         "period": self._period_days(period),
                     },
-                    fields=["id", "name", "margin", "revenue", "cost", "quantity"],
+                    fields=["products", "metrics", "insights"],
                     reason="Product financial context can explain sales performance.",
                 )
             )
