@@ -121,6 +121,15 @@ def test_sales_workflow_resolves_relative_periods_from_question(monkeypatch):
     assert workflow._resolve_period(
         SalesQuestionRequest(question="dame las ventas de los ultimos 7 dias")
     ) == {"date_from": "2026-06-13", "date_to": "2026-06-19"}
+    assert workflow._resolve_period(
+        SalesQuestionRequest(question="cuales son las ventas del dia 11 de junio del 2026")
+    ) == {"date_from": "2026-06-11", "date_to": "2026-06-11"}
+    assert workflow._resolve_period(
+        SalesQuestionRequest(question="11 no 18")
+    ) == {"date_from": "2026-06-11", "date_to": "2026-06-11"}
+    assert workflow._resolve_period(
+        SalesQuestionRequest(question="ventas 2026-06-11")
+    ) == {"date_from": "2026-06-11", "date_to": "2026-06-11"}
 
 
 def test_sales_workflow_keeps_explicit_dates_ahead_of_question(monkeypatch):

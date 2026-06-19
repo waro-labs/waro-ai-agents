@@ -583,6 +583,10 @@ class SalesWorkflow:
         today: date,
     ) -> dict[str, str] | None:
         normalized = self._normalize_question(question)
+        explicit_date = self._explicit_date_from_question(normalized, today=today)
+        if explicit_date:
+            value = explicit_date.isoformat()
+            return {"date_from": value, "date_to": value}
         if re.search(r"\b(hoy|dia actual)\b", normalized):
             value = today.isoformat()
             return {"date_from": value, "date_to": value}
@@ -598,6 +602,66 @@ class SalesWorkflow:
         if re.search(r"\b(ultimos 7 dias|ultimos siete dias)\b", normalized):
             start = today - timedelta(days=6)
             return {"date_from": start.isoformat(), "date_to": today.isoformat()}
+        return None
+
+    def _explicit_date_from_question(self, normalized: str, *, today: date) -> date | None:
+        months = {
+            "enero": 1,
+            "febrero": 2,
+            "marzo": 3,
+            "abril": 4,
+            "mayo": 5,
+            "junio": 6,
+            "julio": 7,
+            "agosto": 8,
+            "septiembre": 9,
+            "setiembre": 9,
+            "octubre": 10,
+            "noviembre": 11,
+            "diciembre": 12,
+        }
+        month_names = "|".join(months)
+        match = re.search(
+            rf"\b(?:dia\s+)?(?P<day>\d{{1,2}})\s+de\s+(?P<month>{month_names})(?:\s+(?:de|del)\s+(?P<year>\d{{4}}))?\b",
+            normalized,
+        )
+        if match:
+            day = int(match.group("day"))
+            month = months[match.group("month")]
+            year = int(match.group("year") or today.year)
+            try:
+                return date(year, month, day)
+            except ValueError:
+                return None
+
+        match = re.search(
+            r"\b(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})\b",
+            normalized,
+        )
+        if not match:
+            match = re.search(
+                r"\b(?P<day>\d{1,2})[-/](?P<month>\d{1,2})(?:[-/](?P<year>\d{2,4}))?\b",
+                normalized,
+            )
+        if match:
+            day = int(match.group("day"))
+            month = int(match.group("month"))
+            year_text = match.group("year")
+            year = today.year if not year_text else int(year_text)
+            if year < 100:
+                year += 2000
+            try:
+                return date(year, month, day)
+            except ValueError:
+                return None
+
+        correction = re.search(r"\b(?P<day>\d{1,2})\s+no\s+\d{1,2}\b", normalized)
+        if correction:
+            day = int(correction.group("day"))
+            try:
+                return date(today.year, today.month, day)
+            except ValueError:
+                return None
         return None
 
     def _normalize_question(self, question: str) -> str:
