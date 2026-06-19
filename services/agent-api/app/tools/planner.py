@@ -108,7 +108,10 @@ class ToolPlanner:
             return "product"
         if re.search(r"\b(pago|pagos|metodo|metodos|payment)\b", normalized):
             return "payment"
-        if re.search(r"\b(dia|dias|fecha|fechas|date)\b", normalized):
+        if re.search(
+            r"\b(por dia|por dias|por fecha|por fechas|diario|diaria|dia a dia|date)\b",
+            normalized,
+        ):
             return "date"
         return None
 

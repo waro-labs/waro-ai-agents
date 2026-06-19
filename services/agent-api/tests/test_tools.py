@@ -111,6 +111,29 @@ def test_sales_tool_planner_adds_financial_context_when_available():
     assert plan.steps[1].arguments == {"sort-by": "margin", "period": 19}
 
 
+def test_sales_tool_planner_does_not_group_single_day_language_by_date():
+    plan = ToolPlanner().plan_sales(
+        question="dime las ventas del dia de ayer",
+        period={"date_from": "2026-06-18", "date_to": "2026-06-18"},
+        scopes=("orders:read",),
+    )
+
+    assert plan.steps[0].arguments == {
+        "date-from": "2026-06-18",
+        "date-to": "2026-06-18",
+    }
+
+
+def test_sales_tool_planner_groups_when_user_asks_by_day():
+    plan = ToolPlanner().plan_sales(
+        question="dame las ventas por dia",
+        period={"date_from": "2026-06-01", "date_to": "2026-06-18"},
+        scopes=("orders:read",),
+    )
+
+    assert plan.steps[0].arguments["group-by"] == "date"
+
+
 def test_args_reject_extra_flags_and_build_typed_cli_args():
     spec = get_tool_spec("waro.menu.products")
 
