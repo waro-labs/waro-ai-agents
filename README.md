@@ -160,7 +160,7 @@ WHERE id = '<run-id>';
 
 ## Configuration
 
-See `.env.example`.
+See `.env.example` and the [production deployment contract](docs/deployment-contract.md).
 
 ```env
 DATABASE_URL=postgresql://saifer:change-me@postgres:5432/postresWaroLabs
@@ -215,6 +215,7 @@ Phoenix is for trace inspection, not business source of truth.
 
 - [Architecture](docs/architecture.md)
 - [Database analysis](docs/db-analysis.md)
+- [Production deployment contract](docs/deployment-contract.md)
 - [Agent API service](services/agent-api/README.md)
 - [Draft schema migration](migrations/001_ai_rag_audit_schemas.sql)
 - [License](LICENSE.md)
