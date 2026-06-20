@@ -682,6 +682,17 @@ class SalesWorkflow:
             span.set_attribute("waro.tool.plan.strategy", plan.strategy)
             span.set_attribute("waro.tool.plan.step_count", len(plan.steps))
             span.set_attribute("waro.tool.candidates", ",".join(plan.candidate_tools))
+            span.set_attribute(
+                "waro.tool.available",
+                ",".join(str(tool.get("name")) for tool in plan.available_tools),
+            )
+            span.set_attribute(
+                "waro.tool.rejected",
+                ",".join(
+                    f"{tool.get('name')}:{tool.get('rejected_reason')}"
+                    for tool in plan.rejected_tools
+                ),
+            )
             await self._record_step(
                 run_id=run_id,
                 tenant_id=context.tenant_id,

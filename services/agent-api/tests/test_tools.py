@@ -13,7 +13,7 @@ from app.dependencies import internal_auth
 from app.dependencies.internal_auth import InternalRequestContext, require_internal_request
 from app.tools.allowlist import coerce_args, get_tool_spec, resolve_fields
 from app.tools.audit import ToolCallAudit
-from app.tools.catalog import candidate_tools, tool_catalog
+from app.tools.catalog import candidate_tools, discover_tools, tool_catalog
 from app.tools.gateway import ToolGateway
 from app.tools.models import ToolCallRequest
 from app.tools.planner import ToolPlanner
@@ -102,6 +102,20 @@ def test_candidate_tools_rank_relevant_scoped_tools():
     ]
 
 
+def test_tool_discovery_records_relevant_tools_rejected_by_scope():
+    discovery = discover_tools(
+        "realiza un analisis financiero de ventas con margen",
+        preferred_domain="sales",
+        scopes=("orders:read",),
+    )
+
+    assert discovery["available"][0]["name"] == "waro.sales.metrics"
+    rejected_by_name = {tool["name"]: tool for tool in discovery["rejected"]}
+    assert rejected_by_name["waro.financial.products"]["rejected_reason"] == (
+        "missing_scope:financial:read"
+    )
+
+
 def test_sales_tool_planner_adds_financial_context_when_available():
     plan = ToolPlanner().plan_sales(
         question="dame ventas y productos con peor margen",
@@ -116,6 +130,25 @@ def test_sales_tool_planner_adds_financial_context_when_available():
     ]
     assert plan.steps[0].arguments["group-by"] == "product"
     assert plan.steps[1].arguments == {"sort-by": "margin", "period": 19}
+    assert plan.available_tools[0]["name"] == "waro.sales.metrics"
+    assert "waro.financial.products" not in {
+        str(tool["name"]) for tool in plan.rejected_tools
+    }
+
+
+def test_sales_tool_planner_exposes_financial_tool_rejection_without_scope():
+    plan = ToolPlanner().plan_sales(
+        question="realiza un analisis financiero de ventas con margen",
+        period={"date_from": "2026-06-01", "date_to": "2026-06-19"},
+        scopes=("orders:read",),
+        answer_style="financial_analysis",
+    )
+
+    assert [step.tool_name for step in plan.steps] == ["waro.sales.metrics"]
+    rejected_by_name = {tool["name"]: tool for tool in plan.rejected_tools}
+    assert rejected_by_name["waro.financial.products"]["rejected_reason"] == (
+        "missing_scope:financial:read"
+    )
 
 
 def test_sales_tool_planner_does_not_group_single_day_language_by_date():
