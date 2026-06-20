@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any
 
-from app.tools.catalog import candidate_tools, normalize_query
+from app.tools.catalog import discover_tools, normalize_query
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,8 @@ class ToolPlan:
     candidate_tools: list[str]
     steps: list[ToolPlanStep] = field(default_factory=list)
     semantic_plan: dict[str, Any] | None = None
+    available_tools: list[dict[str, Any]] = field(default_factory=list)
+    rejected_tools: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +36,8 @@ class ToolPlan:
             "candidate_tools": self.candidate_tools,
             "steps": [step.to_dict() for step in self.steps],
             "semantic_plan": self.semantic_plan,
+            "available_tools": self.available_tools,
+            "rejected_tools": self.rejected_tools,
         }
 
 
@@ -51,13 +55,15 @@ class ToolPlanner:
         semantic_plan: dict[str, Any] | None = None,
     ) -> ToolPlan:
         normalized = normalize_query(question)
-        candidates = candidate_tools(
+        discovery = discover_tools(
             question,
             preferred_domain="sales",
             scopes=scopes,
             limit=6,
         )
-        candidate_names = [spec.name for spec in candidates]
+        available_tools = discovery["available"]
+        rejected_tools = discovery["rejected"]
+        candidate_names = [str(tool["name"]) for tool in available_tools]
 
         metrics_group_by = group_by or self._infer_sales_group_by(normalized)
         metrics_arguments: dict[str, Any] = {
@@ -112,6 +118,8 @@ class ToolPlanner:
                 "group_by": metrics_group_by,
                 "answer_style": answer_style,
             },
+            available_tools=available_tools,
+            rejected_tools=rejected_tools,
         )
 
     def _infer_sales_group_by(self, normalized: str) -> str | None:
