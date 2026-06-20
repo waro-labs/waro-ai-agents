@@ -78,6 +78,25 @@ def test_financial_products_defaults_to_top_level_sections():
     assert resolve_fields(spec, ["products", "metrics"]) == ("products", "metrics")
 
 
+def test_customer_tools_default_to_real_cli_fields():
+    list_spec = get_tool_spec("waro.customers.list")
+    metrics_spec = get_tool_spec("waro.customers.metrics")
+
+    assert resolve_fields(list_spec, None) == (
+        "customer_id",
+        "name",
+        "phone",
+        "order_count",
+        "total_spent",
+        "avg_ticket",
+        "last_order_date",
+        "waros_balance",
+    )
+    assert resolve_fields(metrics_spec, None) == ("summary", "top_customers")
+    with pytest.raises(ValueError):
+        resolve_fields(list_spec, ["data"])
+
+
 def test_tool_catalog_exposes_auditable_tool_metadata():
     catalog = tool_catalog()
     sales_metrics = next(tool for tool in catalog if tool["name"] == "waro.sales.metrics")
@@ -302,6 +321,17 @@ def test_sales_tool_planner_uses_semantic_customer_ranking_contract_with_typos()
         "sort-direction": "desc",
         "limit": 20,
     }
+    assert plan.steps[1].fields == ["summary", "top_customers"]
+    assert plan.steps[2].fields == [
+        "customer_id",
+        "name",
+        "phone",
+        "order_count",
+        "total_spent",
+        "avg_ticket",
+        "last_order_date",
+        "waros_balance",
+    ]
     assert plan.semantic_plan
     assert plan.semantic_plan["request_kind"] == "customer_ranking"
 

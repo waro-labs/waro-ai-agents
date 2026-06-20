@@ -2541,6 +2541,13 @@ class SalesWorkflow:
             ]
         if customer_metrics:
             context["customer_metrics"] = sanitize_value(customer_metrics.get("data", customer_metrics))
+            if (
+                not customer_rows
+                and isinstance(customer_metrics.get("top_customers"), list)
+            ):
+                customer_rows = [
+                    row for row in customer_metrics["top_customers"] if isinstance(row, dict)
+                ]
         if customer_rows:
             context["customers"] = [
                 {

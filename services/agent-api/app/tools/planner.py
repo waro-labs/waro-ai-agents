@@ -184,7 +184,7 @@ class ToolPlanner:
                         "date-from": period["date_from"],
                         "date-to": period["date_to"],
                     },
-                    fields=["data", "meta", "success"],
+                    fields=["summary", "top_customers"],
                     reason="Customer metrics can explain demand, retention, and frequency.",
                 ),
             )
@@ -207,7 +207,16 @@ class ToolPlanner:
                             "sort-direction": "desc",
                             "limit": requested_limit,
                         },
-                        fields=["data", "meta", "success"],
+                        fields=[
+                            "customer_id",
+                            "name",
+                            "phone",
+                            "order_count",
+                            "total_spent",
+                            "avg_ticket",
+                            "last_order_date",
+                            "waros_balance",
+                        ],
                         reason="Customer ranking can identify the best customers for the selected period.",
                     ),
                 )
