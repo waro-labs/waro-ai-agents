@@ -54,10 +54,22 @@ def test_unknown_tool_is_not_allowlisted():
 def test_fields_are_required_or_defaulted_and_limited():
     spec = get_tool_spec("waro.menu.products")
 
-    assert resolve_fields(spec, None) == ("id", "name", "price", "is_available")
+    assert resolve_fields(spec, None) == ("id", "name", "price", "isAvailable")
 
     with pytest.raises(ValueError):
         resolve_fields(spec, ["id", "customer_email"])
+
+
+def test_sales_list_defaults_to_real_cli_fields():
+    spec = get_tool_spec("waro.sales.list")
+
+    assert resolve_fields(spec, None) == ("id", "status", "totalAmount", "orderDate")
+    assert resolve_fields(spec, ["paymentMethod", "customer"]) == (
+        "paymentMethod",
+        "customer",
+    )
+    with pytest.raises(ValueError):
+        resolve_fields(spec, ["total"])
 
 
 def test_sales_metrics_defaults_to_cli_envelope_fields():
@@ -76,6 +88,14 @@ def test_financial_products_defaults_to_top_level_sections():
 
     assert resolve_fields(spec, None) == ("products", "metrics", "insights")
     assert resolve_fields(spec, ["products", "metrics"]) == ("products", "metrics")
+
+
+def test_menu_recipe_defaults_to_real_cli_fields():
+    spec = get_tool_spec("waro.menu.recipes")
+
+    assert resolve_fields(spec, None) == ("id", "name", "isActive", "ingredients")
+    with pytest.raises(ValueError):
+        resolve_fields(spec, ["is_active"])
 
 
 def test_customer_tools_default_to_real_cli_fields():

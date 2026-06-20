@@ -2534,7 +2534,9 @@ class SalesWorkflow:
                     "id": row.get("id"),
                     "name": row.get("name"),
                     "price": row.get("price"),
-                    "is_available": row.get("is_available"),
+                    "is_available": row.get("is_available")
+                    if row.get("is_available") is not None
+                    else row.get("isAvailable"),
                     "category": row.get("category"),
                 }
                 for row in menu_rows[:10]

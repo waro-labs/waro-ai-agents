@@ -165,7 +165,7 @@ class ToolPlanner:
                 ToolPlanStep(
                     tool_name="waro.menu.products",
                     arguments={"limit": 50},
-                    fields=["id", "name", "price", "is_available", "category"],
+                    fields=["id", "name", "price", "isAvailable", "category"],
                     reason="Menu product context can clarify product-level questions.",
                 ),
             )

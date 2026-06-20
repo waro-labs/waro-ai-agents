@@ -188,9 +188,18 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         command=("menu", "products"),
         scope="menu:read",
         args_model=MenuProductsArgs,
-        default_fields=("id", "name", "price", "is_available"),
+        default_fields=("id", "name", "price", "isAvailable"),
         allowed_fields=frozenset(
-            {"id", "name", "price", "is_available", "category", "cost", "margin"}
+            {
+                "id",
+                "name",
+                "price",
+                "isAvailable",
+                "category",
+                "calculatedCost",
+                "perceivedCost",
+                "preparationTime",
+            }
         ),
         domain="menu",
         description="List menu products and product attributes, including price and availability.",
@@ -202,8 +211,10 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         command=("menu", "recipes"),
         scope="menu:read",
         args_model=MenuRecipesArgs,
-        default_fields=("id", "name", "is_active", "cost"),
-        allowed_fields=frozenset({"id", "name", "is_active", "cost", "ingredients_count"}),
+        default_fields=("id", "name", "isActive", "ingredients"),
+        allowed_fields=frozenset(
+            {"id", "name", "isActive", "ingredients", "description", "createdAt", "updatedAt"}
+        ),
         domain="menu",
         description="List menu recipes and recipe cost/activity metadata.",
         tags=("menu", "recipes", "ingredients", "cost"),
@@ -306,9 +317,19 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         command=("sales", "list"),
         scope="orders:read",
         args_model=SalesListArgs,
-        default_fields=("id", "status", "total", "order_date"),
+        default_fields=("id", "status", "totalAmount", "orderDate"),
         allowed_fields=frozenset(
-            {"id", "status", "total", "order_date", "payment_method", "customer_name"}
+            {
+                "id",
+                "status",
+                "totalAmount",
+                "orderDate",
+                "paymentMethod",
+                "customer",
+                "orderNumber",
+                "itemsCount",
+                "items",
+            }
         ),
         domain="sales",
         description="List sales orders with status, payment method, customer, date, and total.",
