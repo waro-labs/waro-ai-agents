@@ -58,7 +58,7 @@ class WaroCliRunner:
         argv = [
             self.settings.waro_cli_binary,
             "--output",
-            "json",
+            "agent-json",
             "--no-color",
             "--fields",
             ",".join(fields),
@@ -114,8 +114,11 @@ class WaroCliRunner:
             )
 
         if proc.returncode != 0:
+            error_payload = self._parse_agent_error(stdout)
             raise ToolRunError(
-                message="Tool execution failed.",
+                message=error_payload.get("error", {}).get("message", "Tool execution failed.")
+                if isinstance(error_payload, dict)
+                else "Tool execution failed.",
                 returncode=proc.returncode,
                 stderr=stderr,
                 stdout=stdout,
@@ -130,10 +133,53 @@ class WaroCliRunner:
         if not stripped:
             return {}
         try:
-            return json.loads(stripped)
+            parsed = json.loads(stripped)
         except json.JSONDecodeError:
             rows = [json.loads(line) for line in stripped.splitlines() if line.strip()]
             return rows
+        if isinstance(parsed, dict) and parsed.get("schema_version") == "waro.agent.v1":
+            return self._normalize_agent_result(parsed)
+        return parsed
+
+    def _parse_agent_error(self, stdout: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(stdout.strip() or "{}")
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict) and parsed.get("schema_version") == "waro.agent.v1":
+            return parsed
+        return {}
+
+    def _normalize_agent_result(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        rows = envelope.get("rows")
+        if not isinstance(rows, list):
+            rows = []
+        data = envelope.get("data")
+        row_path = envelope.get("row_path")
+        normalized: dict[str, Any] = {
+            "rows": rows,
+            "data": data,
+            "pagination": envelope.get("pagination"),
+            "_agent": {
+                "schema_version": envelope.get("schema_version"),
+                "command": envelope.get("command"),
+                "method": envelope.get("method"),
+                "path": envelope.get("path"),
+                "scope": envelope.get("scope"),
+                "paginates": envelope.get("paginates"),
+                "row_path": row_path,
+                "available_fields": envelope.get("available_fields") or [],
+                "applied_fields": envelope.get("applied_fields"),
+            },
+        }
+        if isinstance(data, dict):
+            normalized.update(data)
+        if isinstance(row_path, str) and rows:
+            key = row_path.split(".")[-1]
+            normalized[key] = rows
+            if envelope.get("data") is None:
+                normalized["data"] = rows
+        return normalized
 
     def _env(self) -> dict[str, str]:
         env = {

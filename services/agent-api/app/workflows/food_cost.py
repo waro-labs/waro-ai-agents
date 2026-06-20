@@ -667,6 +667,8 @@ class FoodCostWorkflow:
             if call["tool_name"] != tool_name or call["status"] != "succeeded":
                 continue
             result = call.get("result")
+            if isinstance(result, dict) and isinstance(result.get("rows"), list):
+                return [row for row in result["rows"] if isinstance(row, dict)]
             if isinstance(result, dict) and isinstance(result.get("data"), list):
                 return [row for row in result["data"] if isinstance(row, dict)]
             if isinstance(result, list):

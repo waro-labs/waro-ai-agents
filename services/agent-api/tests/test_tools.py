@@ -395,13 +395,41 @@ def test_runner_builds_argv_without_shell_strings():
     assert argv[:7] == (
         "/tmp/agent-api/.local/bin/waro",
         "--output",
-        "json",
+        "agent-json",
         "--no-color",
         "--fields",
         "product_id,product_name",
         "analytics",
     )
     assert argv[7:] == ("food-cost", "--date-from", "2026-06-01", "--dry-run")
+
+
+def test_runner_normalizes_agent_json_envelope():
+    runner = WaroCliRunner(Settings())
+    result = runner._parse_stdout(
+        """
+        {
+          "schema_version": "waro.agent.v1",
+          "ok": true,
+          "command": "financial products",
+          "method": "POST",
+          "path": "/v1/financial/products",
+          "scope": "financial:read",
+          "paginates": false,
+          "row_path": "products",
+          "rows": [{"id": "p1", "name": "Arepa"}],
+          "data": {"metrics": {"total": 1}, "insights": []},
+          "pagination": null,
+          "available_fields": ["id", "name"],
+          "applied_fields": ["products", "metrics"]
+        }
+        """
+    )
+
+    assert result["rows"] == [{"id": "p1", "name": "Arepa"}]
+    assert result["products"] == [{"id": "p1", "name": "Arepa"}]
+    assert result["metrics"] == {"total": 1}
+    assert result["_agent"]["row_path"] == "products"
 
 
 @pytest.mark.asyncio

@@ -181,11 +181,13 @@ class SalesWorkflow:
 
     def _tool_result_shape(self, result: Any) -> dict[str, Any]:
         if isinstance(result, dict):
+            rows = result.get("rows")
             data = result.get("data")
             products = result.get("products")
             return {
                 "kind": "dict",
                 "keys": sorted(str(key) for key in result.keys())[:20],
+                "row_count": len(rows) if isinstance(rows, list) else None,
                 "data_type": type(data).__name__ if data is not None else None,
                 "data_count": len(data) if isinstance(data, list) else None,
                 "products_count": len(products) if isinstance(products, list) else None,
@@ -2405,6 +2407,12 @@ class SalesWorkflow:
                 continue
             result = call.get("result")
             if isinstance(result, dict):
+                rows = result.get("rows")
+                if isinstance(rows, list):
+                    metric_rows = [row for row in rows if isinstance(row, dict) and row]
+                    if metric_rows:
+                        totals = self._aggregate_metric_rows(metric_rows)
+                        return {"series": metric_rows, **totals}
                 data = result.get("data")
                 if isinstance(data, dict):
                     return data
@@ -2460,6 +2468,8 @@ class SalesWorkflow:
             if call["tool_name"] != tool_name or call["status"] != "succeeded":
                 continue
             result = call.get("result")
+            if isinstance(result, dict) and isinstance(result.get("rows"), list):
+                return [row for row in result["rows"] if isinstance(row, dict)]
             if isinstance(result, dict) and isinstance(result.get("data"), list):
                 return [row for row in result["data"] if isinstance(row, dict)]
             if isinstance(result, dict) and isinstance(result.get("products"), list):

@@ -8,6 +8,8 @@ from app.tools.sanitize import sanitize_value, truncate_text
 
 def summarize_result(result: Any) -> str:
     if isinstance(result, dict):
+        if isinstance(result.get("rows"), list):
+            return f"Returned {len(result['rows'])} rows."
         if isinstance(result.get("data"), list):
             return f"Returned {len(result['data'])} rows."
         if isinstance(result.get("data"), dict):

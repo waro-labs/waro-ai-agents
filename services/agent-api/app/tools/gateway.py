@@ -11,6 +11,7 @@ from app.dependencies.internal_auth import InternalRequestContext
 from app.telemetry import current_trace_ids, mark_span_error
 from app.tools.allowlist import coerce_args, get_tool_spec, resolve_fields
 from app.tools.audit import ToolCallAudit, summarize_result
+from app.tools.contracts import WaroContractRegistry
 from app.tools.models import ToolCallRequest, ToolCallResponse
 from app.tools.runner import ToolRunError, WaroCliRunner
 from app.tools.sanitize import sanitize_text
@@ -26,6 +27,7 @@ class ToolGateway:
     ):
         self.settings = settings
         self.runner = runner or WaroCliRunner(settings)
+        self.contracts = WaroContractRegistry(settings)
         self.connection_factory = connection_factory
         self.tracer = trace.get_tracer(__name__)
 
@@ -50,7 +52,8 @@ class ToolGateway:
 
         try:
             args = coerce_args(spec, request.arguments)
-            fields = resolve_fields(spec, request.fields)
+            contract = await self.contracts.get(spec.name)
+            fields = resolve_fields(spec, request.fields, contract=contract)
         except (ValidationError, ValueError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -66,6 +69,7 @@ class ToolGateway:
             span.set_attribute("waro.tool.name", spec.name)
             span.set_attribute("waro.tool.scope", spec.scope)
             span.set_attribute("waro.tool.dry_run", request.dry_run)
+            span.set_attribute("waro.tool.contract.source", "cli_schema" if contract else "fallback")
             span.set_attribute(
                 "waro.tool.fields",
                 ",".join(fields),
@@ -188,11 +192,12 @@ class ToolGateway:
 
     def _result_shape(self, result: Any) -> dict[str, Any]:
         if isinstance(result, dict):
+            rows = result.get("rows")
             data = result.get("data")
             products = result.get("products")
             return {
                 "kind": "dict",
-                "row_count": None,
+                "row_count": len(rows) if isinstance(rows, list) else None,
                 "data_count": len(data) if isinstance(data, list) else None,
                 "products_count": len(products) if isinstance(products, list) else None,
             }

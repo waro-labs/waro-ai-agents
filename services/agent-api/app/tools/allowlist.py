@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.tools.contracts import ResponseContract
+
 
 class ToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -398,9 +400,19 @@ def coerce_args(spec: ToolSpec, arguments: dict[str, Any]) -> ToolArgs:
     return spec.args_model.model_validate(arguments)
 
 
-def resolve_fields(spec: ToolSpec, requested_fields: list[str] | None) -> tuple[str, ...]:
-    fields = tuple(requested_fields or spec.default_fields)
-    rejected = [field for field in fields if field not in spec.allowed_fields]
+def resolve_fields(
+    spec: ToolSpec,
+    requested_fields: list[str] | None,
+    contract: ResponseContract | None = None,
+) -> tuple[str, ...]:
+    default_fields = contract.default_fields if contract is not None else spec.default_fields
+    allowed_fields = (
+        frozenset(contract.fields) | frozenset(contract.default_fields)
+        if contract is not None
+        else spec.allowed_fields
+    )
+    fields = tuple(requested_fields or default_fields)
+    rejected = [field for field in fields if field not in allowed_fields]
     if rejected:
         raise ValueError(f"Unsupported fields for {spec.name}: {', '.join(rejected)}")
     return fields
