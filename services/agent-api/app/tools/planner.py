@@ -4,6 +4,8 @@ from typing import Any
 
 from app.tools.catalog import discover_tools, normalize_query
 
+MAX_SALES_TOOL_STEPS = 6
+
 
 @dataclass(frozen=True)
 class ToolPlanStep:
@@ -65,28 +67,35 @@ class ToolPlanner:
         rejected_tools = discovery["rejected"]
         candidate_names = [str(tool["name"]) for tool in available_tools]
 
+        requested_tools = self._semantic_tool_names(semantic_plan)
         metrics_group_by = group_by or self._infer_sales_group_by(normalized)
+        sales_metrics_group_by = None if metrics_group_by == "product" else metrics_group_by
         metrics_arguments: dict[str, Any] = {
             "date-from": period["date_from"],
             "date-to": period["date_to"],
         }
-        if metrics_group_by:
-            metrics_arguments["group-by"] = metrics_group_by
+        if sales_metrics_group_by:
+            metrics_arguments["group-by"] = sales_metrics_group_by
 
-        steps = [
+        steps: list[ToolPlanStep] = []
+        self._append_step(
+            steps,
             ToolPlanStep(
                 tool_name="waro.sales.metrics",
                 arguments=metrics_arguments,
                 fields=["data", "meta", "success"],
                 reason="Primary sales metrics are required for sales analysis.",
-            )
-        ]
+            ),
+        )
 
         if (
-            answer_style == "financial_analysis"
+            "waro.financial.products" in requested_tools
+            or answer_style == "financial_analysis"
+            or metrics_group_by == "product"
             or self._needs_financial_products(normalized)
-        ) and "financial:read" in scopes:
-            steps.append(
+        ) and self._has_scope("financial:read", scopes):
+            self._append_step(
+                steps,
                 ToolPlanStep(
                     tool_name="waro.financial.products",
                     arguments={
@@ -95,18 +104,90 @@ class ToolPlanner:
                     },
                     fields=["products", "metrics", "insights"],
                     reason="Product financial context can explain sales performance.",
-                )
+                ),
             )
 
-        if self._needs_menu_products(normalized) and "menu:read" in scopes:
-            steps.append(
+        if (
+            "waro.analytics.food_cost" in requested_tools
+            or self._needs_food_cost(normalized)
+        ) and self._has_scope("analytics:read", scopes):
+            self._append_step(
+                steps,
+                ToolPlanStep(
+                    tool_name="waro.analytics.food_cost",
+                    arguments={
+                        "date-from": period["date_from"],
+                        "date-to": period["date_to"],
+                    },
+                    fields=["product_id", "product_name", "food_cost_pct", "margin_pct"],
+                    reason="Food-cost context can explain margin and profitability questions.",
+                ),
+            )
+
+        if (
+            "waro.analytics.menu" in requested_tools
+            or self._needs_menu_analysis(normalized)
+        ) and self._has_scope("analytics:read", scopes):
+            self._append_step(
+                steps,
+                ToolPlanStep(
+                    tool_name="waro.analytics.menu",
+                    arguments={
+                        "date-from": period["date_from"],
+                        "date-to": period["date_to"],
+                        "limit": 20,
+                    },
+                    fields=["data", "meta", "success"],
+                    reason="Menu analytics can classify product portfolio performance.",
+                ),
+            )
+
+        if (
+            "waro.menu.products" in requested_tools
+            or self._needs_menu_products(normalized)
+        ) and self._has_scope("menu:read", scopes):
+            self._append_step(
+                steps,
                 ToolPlanStep(
                     tool_name="waro.menu.products",
                     arguments={"limit": 50},
                     fields=["id", "name", "price", "is_available", "category"],
                     reason="Menu product context can clarify product-level questions.",
-                )
+                ),
             )
+
+        if (
+            "waro.customers.metrics" in requested_tools
+            or self._needs_customer_metrics(normalized)
+        ) and self._has_scope("customers:read", scopes):
+            self._append_step(
+                steps,
+                ToolPlanStep(
+                    tool_name="waro.customers.metrics",
+                    arguments={
+                        "date-from": period["date_from"],
+                        "date-to": period["date_to"],
+                    },
+                    fields=["data", "meta", "success"],
+                    reason="Customer metrics can explain demand, retention, and frequency.",
+                ),
+            )
+            if self._needs_customer_ranking(normalized):
+                self._append_step(
+                    steps,
+                    ToolPlanStep(
+                        tool_name="waro.customers.list",
+                        arguments={
+                            "date-from": period["date_from"],
+                            "date-to": period["date_to"],
+                            "sort-field": self._customer_sort_field(normalized),
+                            "sort-direction": "desc",
+                            "limit": 20,
+                        },
+                        fields=["data", "meta", "success"],
+                        reason="Customer ranking can identify the best customers for the selected period.",
+                    ),
+                )
 
         return ToolPlan(
             strategy="catalog_sales_planner_v1",
@@ -116,11 +197,32 @@ class ToolPlanner:
                 **(semantic_plan or {}),
                 "period": period,
                 "group_by": metrics_group_by,
+                "sales_metrics_group_by": sales_metrics_group_by,
                 "answer_style": answer_style,
             },
             available_tools=available_tools,
             rejected_tools=rejected_tools,
         )
+
+    def _append_step(self, steps: list[ToolPlanStep], step: ToolPlanStep) -> None:
+        if len(steps) >= MAX_SALES_TOOL_STEPS:
+            return
+        if any(existing.tool_name == step.tool_name for existing in steps):
+            return
+        steps.append(step)
+
+    def _has_scope(self, scope: str, scopes: tuple[str, ...]) -> bool:
+        return scope in scopes
+
+    def _semantic_tool_names(self, semantic_plan: dict[str, Any] | None) -> set[str]:
+        tools = (semantic_plan or {}).get("tools", [])
+        if not isinstance(tools, list):
+            return set()
+        names: set[str] = set()
+        for tool in tools:
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+                names.add(tool["name"])
+        return names
 
     def _infer_sales_group_by(self, normalized: str) -> str | None:
         if re.search(r"\b(hora|horas|hour)\b", normalized):
@@ -145,17 +247,62 @@ class ToolPlanner:
             or re.search(r"\b(financier[ao]s?|utilidad|ganancia|ganancias|profit)\b", normalized)
         )
 
-    def _needs_menu_products(self, normalized: str) -> bool:
+    def _needs_food_cost(self, normalized: str) -> bool:
         return bool(
             re.search(
-                r"\b(menu|disponibles?|precio|precios|categoria)\b",
+                r"\b(food cost|costo de comida|margen|margenes|rentabilidad|rentables?|utilidad|ganancia|ganancias)\b",
                 normalized,
             )
         )
 
+    def _needs_menu_analysis(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(portafolio|menu|estrella|bajo rendimiento|performance|desempeno|productos?)\b",
+                normalized,
+            )
+        )
+
+    def _needs_menu_products(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(menu|disponibles?|precio|precios|categoria|categorias)\b",
+                normalized,
+            )
+        )
+
+    def _needs_customer_metrics(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(clientes?|compradores?|retencion|frecuencia|fidelidad|churn|recencia|recompra|mejores?)\b",
+                normalized,
+            )
+        )
+
+    def _needs_customer_ranking(self, normalized: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(clientes?|compradores?)\b",
+                normalized,
+            )
+            and re.search(
+                r"\b(mejores?|top|mayor(?:es)?|mas|compran|gasto|ticket)\b",
+                normalized,
+            )
+        )
+
+    def _customer_sort_field(self, normalized: str) -> str:
+        if re.search(r"\b(ticket|promedio)\b", normalized):
+            return "avg_ticket"
+        if re.search(r"\b(ordenes?|frecuencia|compran|compras)\b", normalized):
+            return "order_count"
+        return "total_spent"
+
     def _financial_sort(self, normalized: str) -> str:
         if re.search(r"\b(margen|rentabilidad|rentables?|peor(?:es)?)\b", normalized):
             return "margin"
+        if re.search(r"\b(ganancia|ganancias|utilidad|utilidades|profit)\b", normalized):
+            return "revenue"
         if re.search(r"\b(cantidad|unidades|vendidos?)\b", normalized):
             return "quantity"
         if re.search(r"\b(costo|costos)\b", normalized):

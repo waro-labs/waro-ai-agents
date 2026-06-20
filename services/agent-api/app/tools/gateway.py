@@ -66,6 +66,17 @@ class ToolGateway:
             span.set_attribute("waro.tool.name", spec.name)
             span.set_attribute("waro.tool.scope", spec.scope)
             span.set_attribute("waro.tool.dry_run", request.dry_run)
+            span.set_attribute(
+                "waro.tool.fields",
+                ",".join(fields),
+            )
+            span.set_attribute(
+                "waro.tool.arguments",
+                sanitize_text(
+                    str(sanitized_arguments["arguments"]),
+                    secrets=[self.settings.waro_api_key or ""],
+                ),
+            )
             span.set_attribute("waro.tenant_id", context.tenant_id)
             span.set_attribute("waro.request_id", context.request_id)
             span.set_attribute("waro.run_id", str(request.run_id))
@@ -87,6 +98,13 @@ class ToolGateway:
                     span_id=span_id,
                 )
                 span.set_attribute("waro.tool_call_id", str(tool_call_id))
+                span.add_event(
+                    "cli.started",
+                    {
+                        "waro.tool.name": spec.name,
+                        "waro.tool.fields": ",".join(fields),
+                    },
+                )
                 try:
                     run_result = await self.runner.run(
                         spec=spec,
@@ -105,6 +123,15 @@ class ToolGateway:
                             )
                     span.set_attribute("waro.tool.status", "failed")
                     span.set_attribute("waro.tool.error_type", type(exc).__name__)
+                    span.set_attribute("waro.tool.returncode", exc.returncode or 0)
+                    span.add_event(
+                        "cli.failed",
+                        {
+                            "waro.tool.name": spec.name,
+                            "waro.tool.error_type": type(exc).__name__,
+                            "waro.tool.returncode": exc.returncode or 0,
+                        },
+                    )
                     await audit.finish_error(
                         context=context,
                         run_id=request.run_id,
@@ -119,8 +146,29 @@ class ToolGateway:
                     )
 
                 result_summary = summarize_result(run_result.result)
+                result_shape = self._result_shape(run_result.result)
                 span.set_attribute("waro.tool.status", "succeeded")
                 span.set_attribute("waro.tool.result_summary", result_summary)
+                span.set_attribute("waro.tool.result.kind", result_shape["kind"])
+                if result_shape.get("row_count") is not None:
+                    span.set_attribute("waro.tool.result.row_count", result_shape["row_count"])
+                if result_shape.get("data_count") is not None:
+                    span.set_attribute("waro.tool.result.data_count", result_shape["data_count"])
+                if result_shape.get("products_count") is not None:
+                    span.set_attribute(
+                        "waro.tool.result.products_count",
+                        result_shape["products_count"],
+                    )
+                span.add_event(
+                    "cli.completed",
+                    {
+                        "waro.tool.name": spec.name,
+                        "waro.tool.result.kind": result_shape["kind"],
+                        "waro.tool.result.row_count": result_shape.get("row_count") or 0,
+                        "waro.tool.result.data_count": result_shape.get("data_count") or 0,
+                        "waro.tool.result.products_count": result_shape.get("products_count") or 0,
+                    },
+                )
                 span.set_status(Status(StatusCode.OK))
                 await audit.finish_success(
                     context=context,
@@ -137,3 +185,27 @@ class ToolGateway:
                     result=run_result.result,
                     result_summary=result_summary,
                 )
+
+    def _result_shape(self, result: Any) -> dict[str, Any]:
+        if isinstance(result, dict):
+            data = result.get("data")
+            products = result.get("products")
+            return {
+                "kind": "dict",
+                "row_count": None,
+                "data_count": len(data) if isinstance(data, list) else None,
+                "products_count": len(products) if isinstance(products, list) else None,
+            }
+        if isinstance(result, list):
+            return {
+                "kind": "list",
+                "row_count": len(result),
+                "data_count": None,
+                "products_count": None,
+            }
+        return {
+            "kind": type(result).__name__,
+            "row_count": None,
+            "data_count": None,
+            "products_count": None,
+        }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import json
 import re
 import unicodedata
 from typing import Any, Literal, TypedDict
@@ -12,7 +13,8 @@ from opentelemetry.trace import Status, StatusCode
 from app.config import Settings
 from app.database import get_db_connection
 from app.dependencies.internal_auth import InternalRequestContext
-from app.llm import LLMAdapter
+from app.llm import LLMAdapter, get_llm_adapter
+from app.llm.prompts import agent_router_messages
 from app.streaming import StreamEvent, stream_event, terminal_error_event
 from app.tools import ToolGateway
 from app.tools.sanitize import truncate_text
@@ -47,16 +49,17 @@ class AgentWorkflow:
     ):
         self.settings = settings
         self.tracer = trace.get_tracer(__name__)
+        self.llm_adapter = llm_adapter or get_llm_adapter(settings)
         self.sales_workflow = SalesWorkflow(
             settings=settings,
             gateway=gateway,
-            llm_adapter=llm_adapter,
+            llm_adapter=self.llm_adapter,
             connection_factory=connection_factory,
         )
         self.food_cost_workflow = FoodCostWorkflow(
             settings=settings,
             gateway=gateway,
-            llm_adapter=llm_adapter,
+            llm_adapter=self.llm_adapter,
             connection_factory=connection_factory,
         )
         self.graph = self._build_graph()
@@ -90,7 +93,7 @@ class AgentWorkflow:
         request: AgentQuestionRequest,
         context: InternalRequestContext,
     ) -> AsyncIterator[StreamEvent]:
-        route = self._route(request)
+        route = await self._route_hybrid(request)
         yield stream_event(
             "step_started",
             data={
@@ -124,7 +127,7 @@ class AgentWorkflow:
 
     async def _route_agent_node(self, state: AgentGraphState) -> AgentGraphState:
         with self.tracer.start_as_current_span("agent.route") as span:
-            route = self._route(state["request"])
+            route = await self._route_hybrid(state["request"])
             span.set_attribute("openinference.span.kind", "CHAIN")
             span.set_attribute("waro.agent.domain", route.workflow)
             span.set_attribute("waro.agent.route.confidence", route.confidence)
@@ -132,6 +135,99 @@ class AgentWorkflow:
             span.set_attribute("waro.request.question_length", len(state["request"].question))
             span.set_status(Status(StatusCode.OK))
             return {"route": route}
+
+    async def _route_hybrid(self, request: AgentQuestionRequest) -> AgentRoute:
+        deterministic_route = self._route(request)
+        if request.workflow or self.settings.llm_provider == "disabled":
+            return deterministic_route
+
+        router_model = self.settings.llm_router_model
+        with self.tracer.start_as_current_span("llm.agent.router") as span:
+            span.set_attribute("openinference.span.kind", "LLM")
+            span.set_attribute("llm.provider", self.llm_adapter.provider)
+            span.set_attribute("llm.model", router_model)
+            span.set_attribute("llm.model_name", router_model)
+            span.set_attribute(
+                "waro.agent.deterministic_domain",
+                deterministic_route.workflow,
+            )
+            span.set_attribute(
+                "waro.agent.deterministic_reason",
+                deterministic_route.reason,
+            )
+            try:
+                response = await self.llm_adapter.complete(
+                    messages=agent_router_messages(question=request.question),
+                    temperature=0,
+                    model=router_model,
+                )
+                self._set_llm_response_span_attributes(span, response)
+                route = self._parse_llm_route(response.content)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_attribute("waro.agent.route.source", "deterministic_after_llm_error")
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                return AgentRoute(
+                    workflow=deterministic_route.workflow,
+                    confidence=deterministic_route.confidence,
+                    reason=f"deterministic_after_llm_error:{deterministic_route.reason}",
+                )
+
+            span.set_attribute("waro.agent.llm_domain", route.workflow)
+            span.set_attribute("waro.agent.llm_confidence", route.confidence)
+            span.set_attribute("waro.agent.llm_reason", route.reason)
+            span.add_event(
+                "agent_router.llm_completed",
+                {
+                    "workflow": route.workflow,
+                    "confidence": route.confidence,
+                    "reason": route.reason,
+                },
+            )
+
+            if route.confidence < 0.7:
+                span.set_attribute("waro.agent.route.source", "deterministic_low_llm_confidence")
+                span.set_status(Status(StatusCode.OK))
+                return AgentRoute(
+                    workflow=deterministic_route.workflow,
+                    confidence=deterministic_route.confidence,
+                    reason=f"deterministic_low_llm_confidence:{deterministic_route.reason}",
+                )
+
+            span.set_attribute("waro.agent.route.source", "llm_prerouter")
+            span.set_status(Status(StatusCode.OK))
+            return route
+
+    def _parse_llm_route(self, content: str) -> AgentRoute:
+        parsed = json.loads(content)
+        workflow = parsed.get("workflow")
+        if workflow not in {"sales", "food_cost"}:
+            raise ValueError("LLM router returned unsupported workflow.")
+        confidence = float(parsed.get("confidence", 0))
+        return AgentRoute(
+            workflow=workflow,
+            confidence=max(0, min(confidence, 1)),
+            reason=f"llm_prerouter:{str(parsed.get('reason', '')).strip() or 'classified'}",
+        )
+
+    def _set_llm_response_span_attributes(self, span: Any, response: Any) -> None:
+        if response.input_tokens is not None:
+            span.set_attribute("llm.usage.prompt_tokens", response.input_tokens)
+            span.set_attribute("llm.token_count.prompt", response.input_tokens)
+        if response.output_tokens is not None:
+            span.set_attribute("llm.usage.completion_tokens", response.output_tokens)
+            span.set_attribute("llm.token_count.completion", response.output_tokens)
+        if response.total_tokens is not None:
+            span.set_attribute("llm.usage.total_tokens", response.total_tokens)
+            span.set_attribute("llm.token_count.total", response.total_tokens)
+        if response.prompt_cost_usd is not None:
+            span.set_attribute("llm.cost.prompt", response.prompt_cost_usd)
+        if response.completion_cost_usd is not None:
+            span.set_attribute("llm.cost.completion", response.completion_cost_usd)
+        if response.estimated_cost_usd is not None:
+            span.set_attribute("llm.cost.estimated_usd", response.estimated_cost_usd)
+            span.set_attribute("llm.cost.total", response.estimated_cost_usd)
+        span.set_attribute("llm.cost.source", response.cost_source)
 
     async def _dispatch_workflow_node(self, state: AgentGraphState) -> AgentGraphState:
         route = state["route"]

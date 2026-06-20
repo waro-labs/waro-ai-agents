@@ -266,6 +266,81 @@ def test_llm_cost_estimate_unknown_model_falls_back():
     assert estimate.source == "pricing_unavailable"
 
 
+def test_llm_cost_estimate_modern_kimi_models():
+    k25 = estimate_llm_cost(
+        provider="kimi",
+        model="kimi-k2.5",
+        input_tokens=1000,
+        output_tokens=500,
+    )
+    k26 = estimate_llm_cost(
+        provider="kimi",
+        model="kimi-k2.6",
+        input_tokens=1000,
+        output_tokens=500,
+    )
+
+    assert k25.estimated_cost_usd == 0.0021
+    assert k25.prompt_cost_usd == 0.0006
+    assert k25.completion_cost_usd == 0.0015
+    assert k25.source == "static:official-kimi-pricing-2026-06-20"
+    assert k26.estimated_cost_usd == 0.00295
+    assert k26.prompt_cost_usd == 0.00095
+    assert k26.completion_cost_usd == 0.002
+    assert k26.source == "static:official-kimi-pricing-2026-06-20"
+
+
+def test_settings_exposes_role_model_fallbacks():
+    settings = Settings(
+        KIMI_MODEL="kimi-default",
+        KIMI_ROUTER_MODEL="kimi-router",
+        KIMI_PLANNER_MODEL="kimi-planner",
+        KIMI_ANALYSIS_MODEL="kimi-analysis",
+        KIMI_COMPOSER_MODEL="kimi-composer",
+    )
+
+    assert settings.llm_router_model == "kimi-router"
+    assert settings.llm_planner_model == "kimi-planner"
+    assert settings.llm_analysis_model == "kimi-analysis"
+    assert settings.llm_composer_model == "kimi-composer"
+    assert (
+        Settings(KIMI_MODEL="kimi-default", KIMI_ROUTER_MODEL=None).llm_router_model
+        == "kimi-default"
+    )
+
+
+@pytest.mark.asyncio
+async def test_kimi_adapter_allows_per_call_model_override():
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 500},
+            },
+        )
+
+    adapter = KimiAdapter(
+        Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-default",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = await adapter.complete(
+        messages=[LLMMessage(role="user", content="hola")],
+        model="kimi-router",
+    )
+
+    assert captured["payload"]["model"] == "kimi-router"
+    assert response.model == "kimi-router"
+
+
 @pytest.mark.asyncio
 async def test_kimi_adapter_wraps_http_errors():
     async def handler(request: httpx.Request) -> httpx.Response:

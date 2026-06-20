@@ -160,7 +160,7 @@ def _score_tool(
         score += 6
         reasons.append("financial_product_signal")
     if spec.name == "waro.menu.products" and re.search(
-        r"\b(menu|productos?|disponibles?|precio)\b",
+        r"\b(menu|productos?|platos?|disponibles?|precio|precios?)\b",
         normalized_question,
     ):
         score += 4
@@ -171,4 +171,28 @@ def _score_tool(
     ):
         score += 6
         reasons.append("food_cost_signal")
+    if spec.name == "waro.analytics.menu" and re.search(
+        r"\b(menu|portafolio|estrella|bajo rendimiento|performance|productos?)\b",
+        normalized_question,
+    ):
+        score += 5
+        reasons.append("menu_analytics_signal")
+    if spec.name == "waro.analytics.alerts" and re.search(
+        r"\b(alertas?|advertencias?|inventario|agotad[oa]s?|riesgo)\b",
+        normalized_question,
+    ):
+        score += 5
+        reasons.append("analytics_alerts_signal")
+    if spec.name == "waro.analytics.data_quality" and re.search(
+        r"\b(calidad de datos|datos|anomalias?|inconsistencias?|validacion)\b",
+        normalized_question,
+    ):
+        score += 5
+        reasons.append("data_quality_signal")
+    if spec.name.startswith("waro.customers") and re.search(
+        r"\b(clientes?|compradores?|retencion|frecuencia|fidelidad|churn|recencia)\b",
+        normalized_question,
+    ):
+        score += 6
+        reasons.append("customer_signal")
     return score, reasons

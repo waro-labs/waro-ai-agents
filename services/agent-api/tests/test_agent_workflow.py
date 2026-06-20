@@ -5,6 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
+from app.llm import LLMResponse
 from app.tools.models import ToolCallResponse
 from app.workflows.agent import AgentWorkflow
 from app.workflows.models import AgentQuestionRequest
@@ -77,6 +78,31 @@ class FakeGateway:
         )
 
 
+class FakeLLMAdapter:
+    provider = "fake"
+
+    def __init__(self, content: str):
+        self.content = content
+        self.calls = []
+        self.call_kwargs = []
+
+    async def complete(self, *, messages, temperature=0.2, model=None):
+        self.calls.append(messages)
+        self.call_kwargs.append({"temperature": temperature, "model": model})
+        return LLMResponse(
+            content=self.content,
+            model=model or "fake-model",
+            provider=self.provider,
+            input_tokens=20,
+            output_tokens=10,
+            total_tokens=30,
+            estimated_cost_usd=None,
+        )
+
+    async def stream_complete(self, *, messages, temperature=0.2, model=None):
+        raise NotImplementedError
+
+
 def build_context() -> InternalRequestContext:
     return InternalRequestContext(
         tenant_id=str(uuid4()),
@@ -117,6 +143,49 @@ def test_agent_workflow_routes_by_explicit_workflow_and_keywords():
     )
     assert food_cost.workflow == "food_cost"
     assert food_cost.reason == "food_cost_keyword"
+
+
+@pytest.mark.asyncio
+async def test_agent_workflow_uses_router_model_for_hybrid_prerouting():
+    llm = FakeLLMAdapter(
+        '{"workflow":"food_cost","confidence":0.91,"reason":"pregunta de recetas"}'
+    )
+    workflow = AgentWorkflow(
+        settings=Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-default",
+            KIMI_ROUTER_MODEL="kimi-cheap-router",
+        ),
+        llm_adapter=llm,
+    )
+
+    route = await workflow._route_hybrid(
+        AgentQuestionRequest(question="que recetas tienen mayor costo")
+    )
+
+    assert route.workflow == "food_cost"
+    assert route.reason.startswith("llm_prerouter:")
+    assert llm.call_kwargs[0]["model"] == "kimi-cheap-router"
+    assert llm.call_kwargs[0]["temperature"] == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_workflow_falls_back_to_deterministic_router_on_low_confidence():
+    llm = FakeLLMAdapter(
+        '{"workflow":"food_cost","confidence":0.4,"reason":"ambiguo"}'
+    )
+    workflow = AgentWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        llm_adapter=llm,
+    )
+
+    route = await workflow._route_hybrid(
+        AgentQuestionRequest(question="dame las ventas de ayer")
+    )
+
+    assert route.workflow == "sales"
+    assert route.reason.startswith("deterministic_low_llm_confidence:")
 
 
 @pytest.mark.asyncio

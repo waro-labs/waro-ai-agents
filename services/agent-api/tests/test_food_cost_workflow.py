@@ -91,26 +91,29 @@ class FakeLLMAdapter:
         self.error = error
         self.response = response
         self.calls: list[list[LLMMessage]] = []
+        self.call_kwargs: list[dict] = []
 
-    async def complete(self, *, messages, temperature=0.2):
+    async def complete(self, *, messages, temperature=0.2, model=None):
         self.calls.append(messages)
+        self.call_kwargs.append({"temperature": temperature, "model": model})
         if self.error:
             raise self.error
         if self.response:
             return self.response
-        return LLMResponse(content=self.content, model="fake-model", provider=self.provider)
+        return LLMResponse(content=self.content, model=model or "fake-model", provider=self.provider)
 
 
 class FakeStreamingLLMAdapter(FakeLLMAdapter):
-    async def stream_complete(self, *, messages, temperature=0.2):
+    async def stream_complete(self, *, messages, temperature=0.2, model=None):
         self.calls.append(messages)
+        self.call_kwargs.append({"temperature": temperature, "model": model, "stream": True})
         yield LLMStreamChunk(text="Resumen")
         yield LLMStreamChunk(text=" Kimi")
         yield LLMStreamChunk(text=" de food cost.")
         yield LLMStreamChunk(
             response=LLMResponse(
                 content="Resumen Kimi de food cost.",
-                model="fake-model",
+                model=model or "fake-model",
                 provider=self.provider,
                 input_tokens=100,
                 output_tokens=40,
@@ -202,7 +205,12 @@ async def test_food_cost_workflow_uses_llm_summary_when_enabled():
         yield connection
 
     workflow = FoodCostWorkflow(
-        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        settings=Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-default",
+            KIMI_COMPOSER_MODEL="kimi-food-composer",
+        ),
         gateway=gateway,
         llm_adapter=llm,
         connection_factory=connection_factory,
@@ -222,6 +230,7 @@ async def test_food_cost_workflow_uses_llm_summary_when_enabled():
 
     assert response.summary == "Resumen Kimi de food cost."
     assert len(llm.calls) == 1
+    assert llm.call_kwargs[0]["model"] == "kimi-food-composer"
     executed_sql = "\n".join(query for query, _ in connection.executes)
     assert "INSERT INTO ai.context_summaries" in executed_sql
     fetched_sql = "\n".join(query for query, _ in connection.fetches)

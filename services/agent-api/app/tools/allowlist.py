@@ -56,6 +56,54 @@ class MenuRecipesArgs(ToolArgs):
     is_active: bool | None = Field(default=None, alias="is-active")
 
 
+class MenuModifiersArgs(ToolArgs):
+    limit: int = Field(default=50, ge=1, le=250)
+    offset: int = Field(default=0, ge=0)
+    all: bool = False
+
+
+class AnalyticsMenuArgs(ToolArgs):
+    date_from: DateString | None = Field(default=None, alias="date-from")
+    date_to: DateString | None = Field(default=None, alias="date-to")
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class AnalyticsAlertsArgs(ToolArgs):
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class AnalyticsDataQualityArgs(ToolArgs):
+    pass
+
+
+class CustomersListArgs(ToolArgs):
+    limit: int = Field(default=50, ge=1, le=250)
+    offset: int = Field(default=0, ge=0)
+    all: bool = False
+    search: str | None = Field(default=None, max_length=120)
+    date_from: DateString | None = Field(default=None, alias="date-from")
+    date_to: DateString | None = Field(default=None, alias="date-to")
+    timezone: str = Field(default="America/Bogota", max_length=64)
+    sort_field: Literal[
+        "total_spent",
+        "order_count",
+        "last_order_date",
+        "avg_ticket",
+        "waros_balance",
+    ] = Field(default="total_spent", alias="sort-field")
+    sort_direction: Literal["asc", "desc"] = Field(default="desc", alias="sort-direction")
+
+
+class CustomersMetricsArgs(ToolArgs):
+    date_from: DateString | None = Field(default=None, alias="date-from")
+    date_to: DateString | None = Field(default=None, alias="date-to")
+    group_by: Literal["date", "weekday", "month"] | None = Field(
+        default=None,
+        alias="group-by",
+    )
+    timezone: str = Field(default="America/Bogota", max_length=64)
+
+
 class SalesListArgs(ToolArgs):
     limit: int = Field(default=50, ge=1, le=250)
     offset: int = Field(default=0, ge=0)
@@ -114,7 +162,7 @@ class ToolSpec:
     args_model: type[ToolArgs]
     default_fields: tuple[str, ...]
     allowed_fields: frozenset[str]
-    domain: Literal["sales", "food_cost", "menu", "financial"]
+    domain: Literal["sales", "food_cost", "menu", "financial", "analytics", "customers"]
     description: str
     tags: tuple[str, ...] = ()
     examples: tuple[str, ...] = ()
@@ -160,6 +208,78 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="List menu recipes and recipe cost/activity metadata.",
         tags=("menu", "recipes", "ingredients", "cost"),
         examples=("recetas activas", "costos de recetas"),
+    ),
+    "waro.menu.modifiers": ToolSpec(
+        name="waro.menu.modifiers",
+        command=("menu", "modifiers"),
+        scope="menu:read",
+        args_model=MenuModifiersArgs,
+        default_fields=("data", "meta", "success"),
+        allowed_fields=frozenset({"data", "meta", "success"}),
+        domain="menu",
+        description="List menu modifiers and add-on options.",
+        tags=("menu", "modifiers", "addons", "options"),
+        examples=("modificadores del menu", "opciones adicionales"),
+    ),
+    "waro.analytics.menu": ToolSpec(
+        name="waro.analytics.menu",
+        command=("analytics", "menu"),
+        scope="analytics:read",
+        args_model=AnalyticsMenuArgs,
+        default_fields=("data", "meta", "success"),
+        allowed_fields=frozenset({"data", "meta", "success"}),
+        domain="analytics",
+        description="Analyze menu portfolio performance and product classifications.",
+        tags=("analytics", "menu", "portfolio", "products", "performance"),
+        examples=("analisis del menu", "productos estrella y bajo rendimiento"),
+    ),
+    "waro.analytics.alerts": ToolSpec(
+        name="waro.analytics.alerts",
+        command=("analytics", "alerts"),
+        scope="analytics:read",
+        args_model=AnalyticsAlertsArgs,
+        default_fields=("data", "meta", "success"),
+        allowed_fields=frozenset({"data", "meta", "success"}),
+        domain="analytics",
+        description="Fetch analytics alerts and operational warnings.",
+        tags=("analytics", "alerts", "warnings", "operations"),
+        examples=("alertas del negocio", "alertas de inventario"),
+    ),
+    "waro.analytics.data_quality": ToolSpec(
+        name="waro.analytics.data_quality",
+        command=("analytics", "data-quality"),
+        scope="analytics:read",
+        args_model=AnalyticsDataQualityArgs,
+        default_fields=("data", "meta", "success"),
+        allowed_fields=frozenset({"data", "meta", "success"}),
+        domain="analytics",
+        description="Check data quality signals and anomalies for analytics inputs.",
+        tags=("analytics", "data quality", "anomalies", "validation"),
+        examples=("calidad de datos", "datos raros o anomalos"),
+    ),
+    "waro.customers.list": ToolSpec(
+        name="waro.customers.list",
+        command=("customers", "list"),
+        scope="customers:read",
+        args_model=CustomersListArgs,
+        default_fields=("data", "meta", "success"),
+        allowed_fields=frozenset({"data", "meta", "success"}),
+        domain="customers",
+        description="List customers ranked by spend, orders, recency, or average ticket.",
+        tags=("customers", "clients", "spend", "orders", "recency"),
+        examples=("mejores clientes", "clientes por gasto"),
+    ),
+    "waro.customers.metrics": ToolSpec(
+        name="waro.customers.metrics",
+        command=("customers", "metrics"),
+        scope="customers:read",
+        args_model=CustomersMetricsArgs,
+        default_fields=("data", "meta", "success"),
+        allowed_fields=frozenset({"data", "meta", "success"}),
+        domain="customers",
+        description="Compute customer metrics such as activity, retention, and grouped trends.",
+        tags=("customers", "metrics", "retention", "frequency", "activity"),
+        examples=("metricas de clientes", "retencion de clientes"),
     ),
     "waro.sales.list": ToolSpec(
         name="waro.sales.list",

@@ -24,6 +24,16 @@ KIMI_PRICING: dict[str, ModelPricing] = {
         output_usd_per_1m=2.00,
         source="static:official-kimi-pricing-2026-06-18",
     ),
+    "kimi-k2.5": ModelPricing(
+        input_usd_per_1m=0.60,
+        output_usd_per_1m=3.00,
+        source="static:official-kimi-pricing-2026-06-20",
+    ),
+    "kimi-k2.6": ModelPricing(
+        input_usd_per_1m=0.95,
+        output_usd_per_1m=4.00,
+        source="static:official-kimi-pricing-2026-06-20",
+    ),
     "kimi-k2.7-code": ModelPricing(
         input_usd_per_1m=0.95,
         output_usd_per_1m=4.00,

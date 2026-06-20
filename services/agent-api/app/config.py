@@ -51,6 +51,10 @@ class Settings(BaseSettings):
         alias="KIMI_BASE_URL",
     )
     kimi_model: str = Field(default="moonshot-v1-8k", alias="KIMI_MODEL")
+    kimi_router_model: str | None = Field(default=None, alias="KIMI_ROUTER_MODEL")
+    kimi_planner_model: str | None = Field(default=None, alias="KIMI_PLANNER_MODEL")
+    kimi_analysis_model: str | None = Field(default=None, alias="KIMI_ANALYSIS_MODEL")
+    kimi_composer_model: str | None = Field(default=None, alias="KIMI_COMPOSER_MODEL")
     llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -58,6 +62,22 @@ class Settings(BaseSettings):
     @property
     def is_signature_verification_enabled(self) -> bool:
         return bool(self.internal_signature_secret)
+
+    @property
+    def llm_router_model(self) -> str:
+        return self.kimi_router_model or self.kimi_model
+
+    @property
+    def llm_planner_model(self) -> str:
+        return self.kimi_planner_model or self.kimi_model
+
+    @property
+    def llm_analysis_model(self) -> str:
+        return self.kimi_analysis_model or self.kimi_model
+
+    @property
+    def llm_composer_model(self) -> str:
+        return self.kimi_composer_model or self.kimi_model
 
 
 @lru_cache

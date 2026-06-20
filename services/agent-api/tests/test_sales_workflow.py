@@ -101,12 +101,14 @@ class FakeLLMAdapter:
     def __init__(self, content: str = "Resumen de ventas generado por LLM."):
         self.content = content
         self.calls: list[list[LLMMessage]] = []
+        self.call_kwargs: list[dict] = []
 
-    async def complete(self, *, messages, temperature=0.2):
+    async def complete(self, *, messages, temperature=0.2, model=None):
         self.calls.append(messages)
+        self.call_kwargs.append({"temperature": temperature, "model": model})
         return LLMResponse(
             content=self.content,
-            model="fake-model",
+            model=model or "fake-model",
             provider=self.provider,
             input_tokens=100,
             output_tokens=40,
@@ -119,14 +121,15 @@ class FakeLLMAdapter:
 
 
 class FakeStreamingLLMAdapter(FakeLLMAdapter):
-    async def stream_complete(self, *, messages, temperature=0.2):
+    async def stream_complete(self, *, messages, temperature=0.2, model=None):
         self.calls.append(messages)
+        self.call_kwargs.append({"temperature": temperature, "model": model, "stream": True})
         yield LLMStreamChunk(text="Ayer vendiste ")
         yield LLMStreamChunk(text="$431.500.")
         yield LLMStreamChunk(
             response=LLMResponse(
                 content="Ayer vendiste $431.500.",
-                model="fake-model",
+                model=model or "fake-model",
                 provider=self.provider,
                 input_tokens=100,
                 output_tokens=40,
@@ -197,9 +200,158 @@ def test_sales_workflow_resolves_answer_style():
     assert workflow._resolve_answer_style("cuales son las ventas de ayer") == "direct_metric"
     assert workflow._resolve_answer_style("analiza las ventas del mes") == "business_analysis"
     assert (
+        workflow._resolve_answer_style("dime los productos mas vendidos del mes")
+        == "business_analysis"
+    )
+    assert (
         workflow._resolve_answer_style("hazme un analisis financiero del mes")
         == "financial_analysis"
     )
+
+
+def test_sales_workflow_product_fallback_does_not_return_generic_sales_summary():
+    workflow = SalesWorkflow(settings=Settings())
+
+    summary = workflow._build_summary(
+        {
+            "intent": "sales_metrics",
+            "answer_style": "business_analysis",
+            "period": {"date_from": "2026-06-01", "date_to": "2026-06-20"},
+            "metrics": {
+                "total_sales": 10107000,
+                "order_count": 393,
+                "avg_ticket": 27024,
+            },
+            "analysis_request": {
+                "objective": "rank_entities",
+                "dimensions": ["overall", "product"],
+                "requested_metrics": ["sales", "product_ranking"],
+            },
+            "auxiliary_context": {
+                "financial_products": [
+                    {
+                        "name": "Burger",
+                        "quantity": 12,
+                        "revenue": 240000,
+                        "profit": 96000,
+                    }
+                ]
+            },
+            "tool_calls": [],
+        }
+    )
+
+    assert "Burger" in summary
+    assert "vendiste" not in summary
+
+
+def test_sales_workflow_product_fallback_reports_product_failure():
+    workflow = SalesWorkflow(settings=Settings())
+
+    summary = workflow._build_summary(
+        {
+            "intent": "sales_metrics",
+            "answer_style": "business_analysis",
+            "period": {"date_from": "2026-06-01", "date_to": "2026-06-20"},
+            "metrics": {
+                "total_sales": 10107000,
+                "order_count": 393,
+                "avg_ticket": 27024,
+            },
+            "analysis_request": {
+                "objective": "rank_entities",
+                "dimensions": ["overall", "product"],
+                "requested_metrics": ["sales", "product_ranking"],
+            },
+            "auxiliary_context": {},
+            "tool_calls": [
+                {
+                    "tool_name": "waro.financial.products",
+                    "status": "failed",
+                }
+            ],
+        }
+    )
+
+    assert "Fallo la consulta de datos de producto" in summary
+    assert "vendiste" not in summary
+
+
+def test_sales_workflow_response_contract_blocks_wrong_fallback():
+    workflow = SalesWorkflow(settings=Settings())
+
+    summary = workflow._build_summary(
+        {
+            "intent": "sales_metrics",
+            "answer_style": "business_analysis",
+            "period": {"date_from": "2026-06-01", "date_to": "2026-06-20"},
+            "metrics": {
+                "total_sales": 10107000,
+                "order_count": 393,
+                "avg_ticket": 27024,
+            },
+            "response_contract": {
+                "request_kind": "product_ranking",
+                "safe_to_answer": False,
+                "error_message": (
+                    "No pude completar el ranking de productos para Del 2026-06-01 al 2026-06-20: "
+                    "faltan datos requeridos (product_financials)."
+                ),
+            },
+        }
+    )
+
+    assert "ranking de productos" in summary
+    assert "vendiste" not in summary
+
+
+def test_sales_workflow_aggregates_grouped_metric_rows():
+    workflow = SalesWorkflow(settings=Settings())
+    data = workflow._metrics_data_for(
+        [
+            {
+                "tool_name": "waro.sales.metrics",
+                "status": "succeeded",
+                "result": {
+                    "data": [
+                        {"date": "2026-06-01", "totalSales": 100000, "totalOrders": 4},
+                        {"date": "2026-06-02", "totalSales": 200000, "totalOrders": 6},
+                    ]
+                },
+            }
+        ],
+        "waro.sales.metrics",
+    )
+
+    assert data["totalSales"] == 300000
+    assert data["totalOrders"] == 10
+    assert data["avgTicket"] == 30000
+    assert len(data["series"]) == 2
+
+
+def test_sales_workflow_daily_fallback_uses_series_not_generic_summary():
+    workflow = SalesWorkflow(settings=Settings())
+
+    summary = workflow._build_summary(
+        {
+            "intent": "sales_metrics",
+            "answer_style": "business_analysis",
+            "period": {"date_from": "2026-06-01", "date_to": "2026-06-20"},
+            "metrics": {
+                "total_sales": 300000,
+                "order_count": 10,
+                "avg_ticket": 30000,
+                "series": [{"date": "2026-06-01"}, {"date": "2026-06-02"}],
+            },
+            "response_contract": {
+                "request_kind": "daily_analysis",
+                "safe_to_answer": True,
+            },
+        }
+    )
+
+    assert "encontre 2 dias con datos" in summary
+    assert "Sales workflow completed" not in summary
 
 
 @pytest.mark.asyncio
@@ -303,6 +455,58 @@ async def test_sales_semantic_planner_groups_daily_average(monkeypatch):
     }
     assert plan.semantic_plan
     assert plan.semantic_plan["group_by"] == "date"
+
+
+@pytest.mark.asyncio
+async def test_sales_semantic_planner_clamps_future_current_month(monkeypatch):
+    monkeypatch.setattr("app.workflows.sales.datetime", FixedDateTime)
+    connection = FakeConnection()
+    llm = FakeLLMAdapter(
+        content=json.dumps(
+            {
+                "intent": "sales_metrics",
+                "date_from": "2026-06-01",
+                "date_to": "2026-06-30",
+                "group_by": "date",
+                "answer_style": "direct_metric",
+                "tools": [{"name": "waro.sales.metrics", "reason": "month average"}],
+                "confidence": 0.8,
+                "reason": "full calendar month",
+            }
+        )
+    )
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-planner-future-clamp",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    plan = await workflow._plan_sales_tool_calls(
+        request=SalesQuestionRequest(question="cuál fue el promedio de ventas por día del mes"),
+        context=context,
+        run_id=uuid4(),
+    )
+
+    assert plan.steps[0].arguments == {
+        "date-from": "2026-06-01",
+        "date-to": "2026-06-19",
+        "group-by": "date",
+    }
+    assert plan.semantic_plan
+    assert plan.semantic_plan["period_source"] == "guardrail_future_clamped"
+    assert plan.semantic_plan["answer_style"] == "business_analysis"
 
 
 def test_sales_workflow_keeps_explicit_dates_ahead_of_question(monkeypatch):
@@ -423,7 +627,7 @@ async def test_sales_workflow_plans_auxiliary_financial_tool_for_product_context
         "waro.sales.metrics",
         "waro.financial.products",
     ]
-    assert gateway.calls[0].arguments["group-by"] == "product"
+    assert "group-by" not in gateway.calls[0].arguments
     assert gateway.calls[1].arguments == {"sort-by": "margin", "period": 19}
     assert gateway.calls[1].fields == ["products", "metrics", "insights"]
     assert response.artifact["tool_plan"]["strategy"] == "catalog_sales_planner_v1"
@@ -487,6 +691,20 @@ async def test_sales_workflow_plans_financial_tool_for_financial_analysis():
         "Burger"
     )
     assert response.artifact["auxiliary_context"]["financial_metrics"]["total_profit"] == 435200
+    assert response.artifact["analysis_request"]["area"] == "finance"
+    assert response.artifact["analysis_request"]["objective"] == "evaluate_gross_profitability"
+    assert response.artifact["analysis_request"]["dimensions"] == ["overall", "product"]
+    assert response.artifact["analysis_request"]["data_available"]["sales"] is True
+    assert response.artifact["analysis_request"]["data_available"]["product_financials"] is True
+    assert response.artifact["analysis_request"]["data_available"]["labor_cost"] is False
+    financial_analysis = response.artifact["financial_analysis"]
+    assert financial_analysis["analysis_quality"] == "partial"
+    assert financial_analysis["analysis_scope"] == "commercial_finance_gross_margin"
+    assert "net_profit" in financial_analysis["missing_metrics"]
+    assert "prime_cost" in financial_analysis["missing_metrics"]
+    assert financial_analysis["supported_metrics"]["product_gross_profit"] == 435200
+    assert financial_analysis["top_products_by_profit"][0]["name"] == "Burger"
+    assert financial_analysis["top_products_by_profit"][0]["profit"] == 43200
 
 
 @pytest.mark.asyncio
@@ -583,6 +801,66 @@ async def test_sales_workflow_handles_follow_up_with_conversation_context():
 
 
 @pytest.mark.asyncio
+async def test_sales_workflow_inherits_context_for_product_profit_drilldown():
+    connection = FakeConnection()
+    connection.latest_context_summary = (
+        "Durante el periodo del 1 de junio al 19 de junio de 2026, "
+        "las ventas totales fueron de 10,107,000 COP, con un margen promedio "
+        "del 40% en los productos. El producto con el mejor margen fue el "
+        "\"COMBO 4 PAREJA BURGUERS POLLO/RES/CHORIZO\", que genero una "
+        "ganancia real de 448,800 COP."
+    )
+    gateway = FakeGateway()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(),
+        gateway=gateway,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-product-drilldown",
+        member_id=None,
+        scopes=("orders:read", "financial:read"),
+    )
+
+    response = await workflow.run(
+        request=SalesQuestionRequest(
+            question="cuales son los productos con mayor ganancia?",
+            conversation_id=uuid4(),
+        ),
+        context=context,
+    )
+
+    assert response.artifact["answer_style"] == "financial_analysis"
+    assert response.artifact["semantic_plan"]["period"] == {
+        "date_from": "2026-06-01",
+        "date_to": "2026-06-19",
+    }
+    assert response.artifact["semantic_plan"]["period_source"] == "conversation_context"
+    assert response.artifact["semantic_plan"]["context_resolution"]["inherited_period"] is True
+    assert [call.tool_name for call in gateway.calls] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+    ]
+    assert gateway.calls[0].arguments == {
+        "date-from": "2026-06-01",
+        "date-to": "2026-06-19",
+    }
+    assert gateway.calls[1].arguments == {"sort-by": "revenue", "period": 19}
+    assert any(
+        "sales_context_resolver" in str(args)
+        for query, args in connection.fetches
+        if "INSERT INTO ai.steps" in query
+    )
+
+
+@pytest.mark.asyncio
 async def test_sales_workflow_uses_llm_summary_when_enabled():
     connection = FakeConnection()
     gateway = FakeGateway()
@@ -593,7 +871,13 @@ async def test_sales_workflow_uses_llm_summary_when_enabled():
         yield connection
 
     workflow = SalesWorkflow(
-        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test-key"),
+        settings=Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="moonshot-v1-8k",
+            KIMI_PLANNER_MODEL=None,
+            KIMI_COMPOSER_MODEL=None,
+        ),
         gateway=gateway,
         llm_adapter=llm,
         connection_factory=connection_factory,
@@ -617,6 +901,8 @@ async def test_sales_workflow_uses_llm_summary_when_enabled():
 
     assert response.summary == "Ayer vendiste $431.500 con ticket promedio de $30.821."
     assert len(llm.calls) == 2
+    assert llm.call_kwargs[0]["model"] == "moonshot-v1-8k"
+    assert llm.call_kwargs[1]["model"] == "moonshot-v1-8k"
     assert llm.calls[0][0].role == "system"
     assert "planner semantico" in llm.calls[0][0].content
     assert "analista senior de ventas" in llm.calls[1][0].content
@@ -624,6 +910,102 @@ async def test_sales_workflow_uses_llm_summary_when_enabled():
     fetched_sql = "\n".join(query for query, _ in connection.fetches)
     assert "sales_summary" in str(connection.fetches)
     assert "INSERT INTO ai.steps" in fetched_sql
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_uses_role_models_for_planner_and_composer():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeLLMAdapter(content="Resumen comercial.")
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-default",
+            KIMI_PLANNER_MODEL="kimi-cheap-planner",
+            KIMI_COMPOSER_MODEL="kimi-composer",
+        ),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-role-models",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+
+    response = await workflow.run(
+        request=SalesQuestionRequest(
+            question="Analiza cuanto vendi ayer?",
+            date_from="2026-06-17",
+            date_to="2026-06-17",
+        ),
+        context=context,
+    )
+
+    assert response.summary == "Resumen comercial."
+    assert llm.call_kwargs[0]["model"] == "kimi-cheap-planner"
+    assert llm.call_kwargs[1]["model"] == "kimi-composer"
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_uses_analysis_model_for_financial_summary():
+    connection = FakeConnection()
+    gateway = FakeGateway()
+    llm = FakeLLMAdapter(
+        content=json.dumps(
+            {
+                "intent": "sales_metrics",
+                "date_from": "2026-06-01",
+                "date_to": "2026-06-19",
+                "group_by": None,
+                "answer_style": "financial_analysis",
+                "tools": [{"name": "waro.financial.products", "reason": "analysis"}],
+                "confidence": 0.9,
+                "reason": "financial analysis",
+            }
+        )
+    )
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test-key",
+            KIMI_MODEL="kimi-default",
+            KIMI_PLANNER_MODEL="kimi-cheap-planner",
+            KIMI_ANALYSIS_MODEL="kimi-strong-analysis",
+        ),
+        gateway=gateway,
+        llm_adapter=llm,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-analysis-model",
+        member_id=None,
+        scopes=("orders:read", "financial:read"),
+    )
+
+    await workflow.run(
+        request=SalesQuestionRequest(question="dame un analisis financiero del mes"),
+        context=context,
+    )
+
+    assert llm.call_kwargs[0]["model"] == "kimi-cheap-planner"
+    assert llm.call_kwargs[1]["model"] == "kimi-strong-analysis"
 
 
 @pytest.mark.asyncio

@@ -139,12 +139,13 @@ class FoodCostWorkflow:
 
             artifact = self._build_artifact(request=request, tool_calls=tool_calls)
             if self.settings.llm_provider != "disabled":
+                summary_model = self.settings.llm_composer_model
                 yield stream_event(
                     "llm_started",
                     run_id=run_id,
                     data={
                         "provider": self.llm_adapter.provider,
-                        "model": self.settings.kimi_model
+                        "model": summary_model
                         if self.settings.llm_provider == "kimi"
                         else None,
                     },
@@ -728,14 +729,16 @@ class FoodCostWorkflow:
             span.set_attribute("llm.provider", self.llm_adapter.provider)
             span.set_attribute("waro.run_id", str(run_id))
             span.set_attribute("waro.tenant_id", context.tenant_id)
+            summary_model = self.settings.llm_composer_model
             if self.settings.llm_provider == "kimi":
-                span.set_attribute("llm.model", self.settings.kimi_model)
-                span.set_attribute("llm.model_name", self.settings.kimi_model)
+                span.set_attribute("llm.model", summary_model)
+                span.set_attribute("llm.model_name", summary_model)
 
             try:
                 response = await self.llm_adapter.complete(
                     messages=food_cost_summary_messages(artifact),
                     temperature=0.2,
+                    model=summary_model,
                 )
             except Exception as exc:
                 span.record_exception(exc)
@@ -747,7 +750,7 @@ class FoodCostWorkflow:
                     name="food_cost_summary",
                     input_json={
                         "provider": self.settings.llm_provider,
-                        "model": self.settings.kimi_model
+                        "model": summary_model
                         if self.settings.llm_provider == "kimi"
                         else None,
                     },
@@ -827,15 +830,17 @@ class FoodCostWorkflow:
             span.set_attribute("llm.provider", self.llm_adapter.provider)
             span.set_attribute("waro.run_id", str(run_id))
             span.set_attribute("waro.tenant_id", context.tenant_id)
+            summary_model = self.settings.llm_composer_model
             if self.settings.llm_provider == "kimi":
-                span.set_attribute("llm.model", self.settings.kimi_model)
-                span.set_attribute("llm.model_name", self.settings.kimi_model)
+                span.set_attribute("llm.model", summary_model)
+                span.set_attribute("llm.model_name", summary_model)
 
             try:
                 response = None
                 async for chunk in stream_complete(
                     messages=food_cost_summary_messages(artifact),
                     temperature=0.2,
+                    model=summary_model,
                 ):
                     if chunk.text:
                         yield stream_event(
@@ -843,7 +848,7 @@ class FoodCostWorkflow:
                             run_id=run_id,
                             data={
                                 "provider": self.llm_adapter.provider,
-                                "model": self.settings.kimi_model
+                                "model": summary_model
                                 if self.settings.llm_provider == "kimi"
                                 else None,
                                 "text": chunk.text,
@@ -863,7 +868,7 @@ class FoodCostWorkflow:
                     name="food_cost_summary",
                     input_json={
                         "provider": self.settings.llm_provider,
-                        "model": self.settings.kimi_model
+                        "model": summary_model
                         if self.settings.llm_provider == "kimi"
                         else None,
                     },

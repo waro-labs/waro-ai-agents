@@ -5,6 +5,33 @@ from app.llm.base import LLMMessage
 from app.tools.sanitize import sanitize_value
 
 
+def agent_router_messages(*, question: str) -> list[LLMMessage]:
+    safe_payload = sanitize_value({"question": question})
+    return [
+        LLMMessage(
+            role="system",
+            content=(
+                "Eres el pre-router de dominio de Kali para WARO. "
+                "No respondas al usuario. Devuelve SOLO JSON valido, sin markdown. "
+                "Tu unica tarea es decidir si la pregunta debe ir al workflow de ventas "
+                "o al workflow de food cost. Usa sales para ventas, ordenes, ingresos, "
+                "ticket promedio, clientes, productos vendidos, analisis comercial o "
+                "analisis financiero basado en ventas/margenes. Usa food_cost para "
+                "recetas, costos de preparacion, insumos, margen de receta, costo de "
+                "comida o rentabilidad operativa por producto/receta. Si la pregunta "
+                "es saludo, conversacion general o ambigua, elige sales con baja "
+                "confianza. Formato exacto: "
+                "{\"workflow\":\"sales|food_cost|unknown\","
+                "\"confidence\":0.0,\"reason\":\"...\"}."
+            ),
+        ),
+        LLMMessage(
+            role="user",
+            content=json.dumps(safe_payload, ensure_ascii=False, default=str),
+        ),
+    ]
+
+
 def sales_planner_messages(
     *,
     question: str,
@@ -98,7 +125,10 @@ def sales_summary_messages(artifact: dict[str, Any]) -> list[LLMMessage]:
             "answer_style": artifact.get("answer_style"),
             "period": artifact.get("period"),
             "metrics": artifact.get("metrics", {}),
+            "analysis_request": artifact.get("analysis_request", {}),
+            "response_contract": artifact.get("response_contract", {}),
             "auxiliary_context": artifact.get("auxiliary_context", {}),
+            "financial_analysis": artifact.get("financial_analysis", {}),
             "highlights": artifact.get("highlights", []),
             "tool_calls": artifact.get("tool_calls", []),
         }
@@ -113,10 +143,17 @@ def sales_summary_messages(artifact: dict[str, Any]) -> list[LLMMessage]:
                 "productos, tendencias ni comparaciones. Obedece answer_style: "
                 "si es direct_metric, responde maximo en 2 frases, sin lectura comercial ni accion; "
                 "si es business_analysis, entrega metricas, lectura comercial breve y una accion; "
-                "si es financial_analysis, cruza ventas con margen/costo/productos disponibles en "
-                "auxiliary_context y da riesgos y acciones financieras; si es diagnostic, explica "
+                "obedece response_contract: si safe_to_answer es false, responde solo el error_message "
+                "y no sustituyas la intencion con metricas generales; "
+                "si es financial_analysis, usa analysis_request y financial_analysis como contrato: "
+                "si analysis_quality es partial, di que es un analisis financiero parcial basado en "
+                "ventas y margen bruto/productos; no afirmes rentabilidad neta, EBITDA, flujo de caja, "
+                "viabilidad de largo plazo ni punto de equilibrio si aparecen en missing_metrics o "
+                "unsupported_conclusions; separa hallazgos soportados, productos relevantes, limites "
+                "de datos y siguiente accion. Si es diagnostic, explica "
                 "el problema con datos y siguientes verificaciones. Si faltan datos, dilo de forma "
-                "directa y no des una lista generica de recomendaciones."
+                "directa y no des una lista generica de recomendaciones. No conviertas una etiqueta "
+                "Low Performance en perdida o baja rentabilidad neta si el JSON no lo soporta."
             ),
         ),
         LLMMessage(

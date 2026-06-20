@@ -81,12 +81,15 @@ def test_financial_products_defaults_to_top_level_sections():
 def test_tool_catalog_exposes_auditable_tool_metadata():
     catalog = tool_catalog()
     sales_metrics = next(tool for tool in catalog if tool["name"] == "waro.sales.metrics")
+    tool_names = {tool["name"] for tool in catalog}
 
     assert sales_metrics["domain"] == "sales"
     assert sales_metrics["scope"] == "orders:read"
     assert "description" in sales_metrics
     assert "arguments_schema" in sales_metrics
     assert "data" in sales_metrics["default_fields"]
+    assert "waro.analytics.menu" in tool_names
+    assert "waro.customers.metrics" in tool_names
 
 
 def test_candidate_tools_rank_relevant_scoped_tools():
@@ -128,12 +131,29 @@ def test_sales_tool_planner_adds_financial_context_when_available():
         "waro.sales.metrics",
         "waro.financial.products",
     ]
-    assert plan.steps[0].arguments["group-by"] == "product"
+    assert "group-by" not in plan.steps[0].arguments
     assert plan.steps[1].arguments == {"sort-by": "margin", "period": 19}
+    assert plan.semantic_plan
+    assert plan.semantic_plan["group_by"] == "product"
+    assert plan.semantic_plan["sales_metrics_group_by"] is None
     assert plan.available_tools[0]["name"] == "waro.sales.metrics"
     assert "waro.financial.products" not in {
         str(tool["name"]) for tool in plan.rejected_tools
     }
+
+
+def test_sales_tool_planner_maps_profit_language_to_revenue_sort():
+    plan = ToolPlanner().plan_sales(
+        question="cuales son los productos con mayor ganancia?",
+        period={"date_from": "2026-06-01", "date_to": "2026-06-19"},
+        scopes=("orders:read", "financial:read"),
+    )
+
+    assert [step.tool_name for step in plan.steps] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+    ]
+    assert plan.steps[1].arguments == {"sort-by": "revenue", "period": 19}
 
 
 def test_sales_tool_planner_exposes_financial_tool_rejection_without_scope():
@@ -172,6 +192,56 @@ def test_sales_tool_planner_groups_when_user_asks_by_day():
     )
 
     assert plan.steps[0].arguments["group-by"] == "date"
+
+
+def test_sales_tool_planner_can_plan_multiple_context_tools_when_scopes_allow():
+    plan = ToolPlanner().plan_sales(
+        question=(
+            "haz un analisis de ventas, food cost, menu y clientes del mes "
+            "para entender productos y retencion"
+        ),
+        period={"date_from": "2026-06-01", "date_to": "2026-06-19"},
+        scopes=(
+            "orders:read",
+            "financial:read",
+            "analytics:read",
+            "menu:read",
+            "customers:read",
+        ),
+        answer_style="financial_analysis",
+    )
+
+    assert [step.tool_name for step in plan.steps] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+        "waro.analytics.food_cost",
+        "waro.analytics.menu",
+        "waro.menu.products",
+        "waro.customers.metrics",
+    ]
+    assert len(plan.steps) == 6
+
+
+def test_sales_tool_planner_ranks_customers_when_scope_allows():
+    plan = ToolPlanner().plan_sales(
+        question="quienes son los mejores clientes del mes",
+        period={"date_from": "2026-06-01", "date_to": "2026-06-20"},
+        scopes=("orders:read", "customers:read"),
+        answer_style="business_analysis",
+    )
+
+    assert [step.tool_name for step in plan.steps] == [
+        "waro.sales.metrics",
+        "waro.customers.metrics",
+        "waro.customers.list",
+    ]
+    assert plan.steps[2].arguments == {
+        "date-from": "2026-06-01",
+        "date-to": "2026-06-20",
+        "sort-field": "total_spent",
+        "sort-direction": "desc",
+        "limit": 20,
+    }
 
 
 def test_args_reject_extra_flags_and_build_typed_cli_args():

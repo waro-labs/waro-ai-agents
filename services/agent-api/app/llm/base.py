@@ -41,6 +41,7 @@ class LLMAdapter(Protocol):
         *,
         messages: list[LLMMessage],
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> LLMResponse:
         ...
 
@@ -49,6 +50,7 @@ class LLMAdapter(Protocol):
         *,
         messages: list[LLMMessage],
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         ...
 
@@ -61,6 +63,7 @@ class DisabledLLMAdapter:
         *,
         messages: list[LLMMessage],
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> LLMResponse:
         raise LLMError("LLM provider is disabled.")
 
@@ -69,6 +72,7 @@ class DisabledLLMAdapter:
         *,
         messages: list[LLMMessage],
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         raise LLMError("LLM provider is disabled.")
         if False:

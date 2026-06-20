@@ -26,10 +26,16 @@ class KimiAdapter:
         *,
         messages: list[LLMMessage],
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> LLMResponse:
         self._require_api_key()
+        selected_model = model or self.settings.kimi_model
         url = self._completion_url()
-        payload = self._completion_payload(messages=messages, temperature=temperature)
+        payload = self._completion_payload(
+            messages=messages,
+            temperature=temperature,
+            model=selected_model,
+        )
         headers = self._headers()
         timeout = httpx.Timeout(self.settings.llm_timeout_seconds)
         try:
@@ -45,18 +51,24 @@ class KimiAdapter:
         data = response.json()
         content = self._extract_content(data)
         usage = self._extract_usage(data)
-        return self._response(content=content, usage=usage)
+        return self._response(content=content, usage=usage, model=selected_model)
 
     async def stream_complete(
         self,
         *,
         messages: list[LLMMessage],
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         self._require_api_key()
+        selected_model = model or self.settings.kimi_model
         url = self._completion_url()
         payload = {
-            **self._completion_payload(messages=messages, temperature=temperature),
+            **self._completion_payload(
+                messages=messages,
+                temperature=temperature,
+                model=selected_model,
+            ),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -97,7 +109,11 @@ class KimiAdapter:
             raise LLMError("Kimi streaming completion request failed.") from exc
 
         yield LLMStreamChunk(
-            response=self._response(content="".join(content_parts), usage=usage)
+            response=self._response(
+                content="".join(content_parts),
+                usage=usage,
+                model=selected_model,
+            )
         )
 
     def _require_api_key(self) -> None:
@@ -112,9 +128,10 @@ class KimiAdapter:
         *,
         messages: list[LLMMessage],
         temperature: float,
+        model: str,
     ) -> dict[str, Any]:
         return {
-            "model": self.settings.kimi_model,
+            "model": model,
             "messages": [
                 {"role": message.role, "content": message.content}
                 for message in messages
@@ -133,16 +150,17 @@ class KimiAdapter:
         *,
         content: str,
         usage: dict[str, int | None],
+        model: str,
     ) -> LLMResponse:
         cost = estimate_llm_cost(
             provider=self.provider,
-            model=self.settings.kimi_model,
+            model=model,
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
         )
         return LLMResponse(
             content=content,
-            model=self.settings.kimi_model,
+            model=model,
             provider=self.provider,
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
