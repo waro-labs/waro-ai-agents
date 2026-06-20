@@ -244,6 +244,68 @@ def test_sales_tool_planner_ranks_customers_when_scope_allows():
     }
 
 
+def test_sales_tool_planner_uses_semantic_product_ranking_contract():
+    plan = ToolPlanner().plan_sales(
+        question="dime cuales son los 20 productos mas vendidos dle presnete mes",
+        period={"date_from": "2026-06-01", "date_to": "2026-06-20"},
+        scopes=("orders:read", "financial:read"),
+        answer_style="business_analysis",
+        semantic_plan={
+            "request_kind": "product_ranking",
+            "dimensions": ["overall", "product"],
+            "requested_metrics": ["quantity_sold", "product_ranking"],
+            "sort_field": "quantity",
+            "limit": 20,
+            "tools": [{"name": "waro.financial.products"}],
+        },
+    )
+
+    assert [step.tool_name for step in plan.steps] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+    ]
+    assert "group-by" not in plan.steps[0].arguments
+    assert plan.steps[1].arguments == {"sort-by": "quantity", "period": 20}
+    assert plan.semantic_plan
+    assert plan.semantic_plan["request_kind"] == "product_ranking"
+    assert plan.semantic_plan["limit"] == 20
+
+
+def test_sales_tool_planner_uses_semantic_customer_ranking_contract_with_typos():
+    plan = ToolPlanner().plan_sales(
+        question="dime cuales son los cleintes conmayotr frecuencia",
+        period={"date_from": "2026-06-01", "date_to": "2026-06-20"},
+        scopes=("orders:read", "customers:read"),
+        answer_style="business_analysis",
+        semantic_plan={
+            "request_kind": "customer_ranking",
+            "dimensions": ["overall", "customer"],
+            "requested_metrics": ["frequency", "customer_activity"],
+            "sort_field": "order_count",
+            "limit": 20,
+            "tools": [
+                {"name": "waro.customers.metrics"},
+                {"name": "waro.customers.list"},
+            ],
+        },
+    )
+
+    assert [step.tool_name for step in plan.steps] == [
+        "waro.sales.metrics",
+        "waro.customers.metrics",
+        "waro.customers.list",
+    ]
+    assert plan.steps[2].arguments == {
+        "date-from": "2026-06-01",
+        "date-to": "2026-06-20",
+        "sort-field": "order_count",
+        "sort-direction": "desc",
+        "limit": 20,
+    }
+    assert plan.semantic_plan
+    assert plan.semantic_plan["request_kind"] == "customer_ranking"
+
+
 def test_args_reject_extra_flags_and_build_typed_cli_args():
     spec = get_tool_spec("waro.menu.products")
 

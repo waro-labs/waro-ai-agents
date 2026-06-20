@@ -68,7 +68,18 @@ class ToolPlanner:
         candidate_names = [str(tool["name"]) for tool in available_tools]
 
         requested_tools = self._semantic_tool_names(semantic_plan)
+        request_kind = self._semantic_text(semantic_plan, "request_kind")
+        dimensions = self._semantic_string_list(semantic_plan, "dimensions")
+        requested_metrics = self._semantic_string_list(semantic_plan, "requested_metrics")
+        sort_field = self._semantic_text(semantic_plan, "sort_field")
+        requested_limit = self._semantic_limit(semantic_plan, default=20)
         metrics_group_by = group_by or self._infer_sales_group_by(normalized)
+        if not metrics_group_by and request_kind == "daily_analysis":
+            metrics_group_by = "date"
+        if not metrics_group_by and "date" in dimensions:
+            metrics_group_by = "date"
+        if not metrics_group_by and "product" in dimensions:
+            metrics_group_by = "product"
         sales_metrics_group_by = None if metrics_group_by == "product" else metrics_group_by
         metrics_arguments: dict[str, Any] = {
             "date-from": period["date_from"],
@@ -90,8 +101,11 @@ class ToolPlanner:
 
         if (
             "waro.financial.products" in requested_tools
+            or request_kind == "product_ranking"
             or answer_style == "financial_analysis"
             or metrics_group_by == "product"
+            or "product" in dimensions
+            or any(metric in requested_metrics for metric in {"product_ranking", "quantity_sold", "gross_profit", "product_profit"})
             or self._needs_financial_products(normalized)
         ) and self._has_scope("financial:read", scopes):
             self._append_step(
@@ -99,7 +113,7 @@ class ToolPlanner:
                 ToolPlanStep(
                     tool_name="waro.financial.products",
                     arguments={
-                        "sort-by": self._financial_sort(normalized),
+                        "sort-by": self._financial_sort(normalized, semantic_sort=sort_field),
                         "period": self._period_days(period),
                     },
                     fields=["products", "metrics", "insights"],
@@ -135,7 +149,7 @@ class ToolPlanner:
                     arguments={
                         "date-from": period["date_from"],
                         "date-to": period["date_to"],
-                        "limit": 20,
+                        "limit": requested_limit,
                     },
                     fields=["data", "meta", "success"],
                     reason="Menu analytics can classify product portfolio performance.",
@@ -158,6 +172,8 @@ class ToolPlanner:
 
         if (
             "waro.customers.metrics" in requested_tools
+            or request_kind == "customer_ranking"
+            or "customer" in dimensions
             or self._needs_customer_metrics(normalized)
         ) and self._has_scope("customers:read", scopes):
             self._append_step(
@@ -172,7 +188,11 @@ class ToolPlanner:
                     reason="Customer metrics can explain demand, retention, and frequency.",
                 ),
             )
-            if self._needs_customer_ranking(normalized):
+            if (
+                "waro.customers.list" in requested_tools
+                or request_kind == "customer_ranking"
+                or self._needs_customer_ranking(normalized)
+            ):
                 self._append_step(
                     steps,
                     ToolPlanStep(
@@ -180,9 +200,12 @@ class ToolPlanner:
                         arguments={
                             "date-from": period["date_from"],
                             "date-to": period["date_to"],
-                            "sort-field": self._customer_sort_field(normalized),
+                            "sort-field": self._customer_sort_field(
+                                normalized,
+                                semantic_sort=sort_field,
+                            ),
                             "sort-direction": "desc",
-                            "limit": 20,
+                            "limit": requested_limit,
                         },
                         fields=["data", "meta", "success"],
                         reason="Customer ranking can identify the best customers for the selected period.",
@@ -199,6 +222,7 @@ class ToolPlanner:
                 "group_by": metrics_group_by,
                 "sales_metrics_group_by": sales_metrics_group_by,
                 "answer_style": answer_style,
+                "limit": requested_limit,
             },
             available_tools=available_tools,
             rejected_tools=rejected_tools,
@@ -223,6 +247,23 @@ class ToolPlanner:
             if isinstance(tool, dict) and isinstance(tool.get("name"), str):
                 names.add(tool["name"])
         return names
+
+    def _semantic_text(self, semantic_plan: dict[str, Any] | None, key: str) -> str | None:
+        value = (semantic_plan or {}).get(key)
+        return value if isinstance(value, str) and value else None
+
+    def _semantic_string_list(self, semantic_plan: dict[str, Any] | None, key: str) -> list[str]:
+        value = (semantic_plan or {}).get(key)
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, str)]
+
+    def _semantic_limit(self, semantic_plan: dict[str, Any] | None, *, default: int) -> int:
+        try:
+            limit = int((semantic_plan or {}).get("limit", default))
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(limit, 50))
 
     def _infer_sales_group_by(self, normalized: str) -> str | None:
         if re.search(r"\b(hora|horas|hour)\b", normalized):
@@ -291,14 +332,18 @@ class ToolPlanner:
             )
         )
 
-    def _customer_sort_field(self, normalized: str) -> str:
+    def _customer_sort_field(self, normalized: str, *, semantic_sort: str | None = None) -> str:
+        if semantic_sort in {"total_spent", "order_count", "last_order_date", "avg_ticket"}:
+            return semantic_sort
         if re.search(r"\b(ticket|promedio)\b", normalized):
             return "avg_ticket"
         if re.search(r"\b(ordenes?|frecuencia|compran|compras)\b", normalized):
             return "order_count"
         return "total_spent"
 
-    def _financial_sort(self, normalized: str) -> str:
+    def _financial_sort(self, normalized: str, *, semantic_sort: str | None = None) -> str:
+        if semantic_sort in {"margin", "revenue", "cost", "quantity"}:
+            return semantic_sort
         if re.search(r"\b(margen|rentabilidad|rentables?|peor(?:es)?)\b", normalized):
             return "margin"
         if re.search(r"\b(ganancia|ganancias|utilidad|utilidades|profit)\b", normalized):

@@ -157,6 +157,9 @@ def test_sales_workflow_resolves_relative_periods_from_question(monkeypatch):
         SalesQuestionRequest(question="dame las ventas del mes")
     ) == {"date_from": "2026-06-01", "date_to": "2026-06-19"}
     assert workflow._resolve_period(
+        SalesQuestionRequest(question="dime los 20 productos mas vendidos dle presnete mes")
+    ) == {"date_from": "2026-06-01", "date_to": "2026-06-19"}
+    assert workflow._resolve_period(
         SalesQuestionRequest(question="cuales son las ventas del mes pasado?")
     ) == {"date_from": "2026-05-01", "date_to": "2026-05-31"}
     assert workflow._resolve_period(
@@ -242,6 +245,80 @@ def test_sales_workflow_product_fallback_does_not_return_generic_sales_summary()
     )
 
     assert "Burger" in summary
+    assert "vendiste" not in summary
+
+
+def test_sales_workflow_product_fallback_respects_requested_limit():
+    workflow = SalesWorkflow(settings=Settings())
+    products = [
+        {"name": f"Producto {index}", "quantity": 30 - index, "profit": index * 1000}
+        for index in range(1, 9)
+    ]
+
+    summary = workflow._build_summary(
+        {
+            "intent": "sales_metrics",
+            "answer_style": "business_analysis",
+            "period": {"date_from": "2026-06-01", "date_to": "2026-06-20"},
+            "metrics": {"total_sales": 10107000, "order_count": 393},
+            "analysis_request": {
+                "request_kind": "product_ranking",
+                "objective": "rank_entities",
+                "dimensions": ["overall", "product"],
+                "requested_metrics": ["quantity_sold", "product_ranking"],
+                "limit": 7,
+            },
+            "auxiliary_context": {"financial_products": products},
+            "tool_calls": [],
+        }
+    )
+
+    assert summary.count("\n") == 7
+    assert "Producto 7" in summary
+    assert "Producto 8" not in summary
+    assert "No pude generar" not in summary
+    assert "vendiste" not in summary
+
+
+def test_sales_workflow_customer_fallback_does_not_return_generic_sales_summary():
+    workflow = SalesWorkflow(settings=Settings())
+
+    summary = workflow._build_summary(
+        {
+            "intent": "sales_metrics",
+            "answer_style": "business_analysis",
+            "period": {"date_from": "2026-06-01", "date_to": "2026-06-20"},
+            "metrics": {
+                "total_sales": 10107000,
+                "order_count": 393,
+                "avg_ticket": 27024,
+            },
+            "analysis_request": {
+                "request_kind": "customer_ranking",
+                "area": "customers",
+                "objective": "rank_entities",
+                "dimensions": ["overall", "customer"],
+                "requested_metrics": ["frequency", "customer_activity"],
+                "limit": 2,
+            },
+            "response_contract": {
+                "request_kind": "customer_ranking",
+                "safe_to_answer": True,
+            },
+            "auxiliary_context": {
+                "customers": [
+                    {"name": "Cliente A", "order_count": 12, "total_spent": 300000},
+                    {"name": "Cliente B", "order_count": 9, "total_spent": 250000},
+                    {"name": "Cliente C", "order_count": 4, "total_spent": 100000},
+                ]
+            },
+            "tool_calls": [],
+        }
+    )
+
+    assert "Cliente A" in summary
+    assert "Cliente B" in summary
+    assert "Cliente C" not in summary
     assert "vendiste" not in summary
 
 

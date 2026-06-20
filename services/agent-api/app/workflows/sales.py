@@ -1110,6 +1110,15 @@ class SalesWorkflow:
                     "period": period,
                     "answer_style": answer_style,
                     "group_by": group_by,
+                    "request_kind": plan.semantic_plan.get("request_kind")
+                    if isinstance(plan.semantic_plan, dict)
+                    else None,
+                    "dimensions": plan.semantic_plan.get("dimensions")
+                    if isinstance(plan.semantic_plan, dict)
+                    else None,
+                    "limit": plan.semantic_plan.get("limit")
+                    if isinstance(plan.semantic_plan, dict)
+                    else None,
                     "steps": [
                         {
                             "tool_name": step.tool_name,
@@ -1137,6 +1146,23 @@ class SalesWorkflow:
             if group_by:
                 span.set_attribute("waro.resolver.group_by", str(group_by))
             span.set_attribute("waro.answer.style", answer_style)
+            if isinstance(plan.semantic_plan, dict):
+                span.set_attribute(
+                    "waro.request.kind",
+                    str(plan.semantic_plan.get("request_kind", "")),
+                )
+                span.set_attribute(
+                    "waro.analysis.dimensions",
+                    ",".join(str(item) for item in plan.semantic_plan.get("dimensions", [])),
+                )
+                span.set_attribute(
+                    "waro.request.limit",
+                    int(plan.semantic_plan.get("limit", 0) or 0),
+                )
+                span.set_attribute(
+                    "waro.sort.field",
+                    str(plan.semantic_plan.get("sort_field") or ""),
+                )
             span.set_attribute("waro.tool.plan.strategy", plan.strategy)
             span.set_attribute("waro.tool.plan.step_count", len(plan.steps))
             span.set_attribute(
@@ -1162,6 +1188,11 @@ class SalesWorkflow:
                     "waro.tool.step_count": len(plan.steps),
                     "waro.group_by": str(group_by or ""),
                     "waro.answer.style": answer_style,
+                    "waro.request.kind": str(
+                        plan.semantic_plan.get("request_kind", "")
+                        if isinstance(plan.semantic_plan, dict)
+                        else ""
+                    ),
                 },
             )
             if plan.rejected_tools:
@@ -1210,6 +1241,14 @@ class SalesWorkflow:
                 span.set_attribute("waro.tenant_id", context.tenant_id)
                 span.set_attribute("waro.planner.source", "deterministic_fallback")
                 span.set_attribute("waro.answer.style", str(fallback.get("answer_style", "")))
+                span.set_attribute("waro.request.kind", str(fallback.get("request_kind", "")))
+                span.set_attribute("waro.analysis.area", str(fallback.get("area", "")))
+                span.set_attribute(
+                    "waro.analysis.dimensions",
+                    ",".join(str(item) for item in fallback.get("dimensions", [])),
+                )
+                span.set_attribute("waro.request.limit", int(fallback.get("limit", 0) or 0))
+                span.set_attribute("waro.sort.field", str(fallback.get("sort_field") or ""))
                 span.set_attribute("waro.group_by", str(fallback.get("group_by") or ""))
                 period = fallback.get("period") if isinstance(fallback.get("period"), dict) else {}
                 span.set_attribute("waro.period.date_from", str(period.get("date_from", "")))
@@ -1226,6 +1265,11 @@ class SalesWorkflow:
                     "source": "deterministic_fallback",
                     "period": fallback.get("period"),
                     "answer_style": fallback.get("answer_style"),
+                    "request_kind": fallback.get("request_kind"),
+                    "area": fallback.get("area"),
+                    "dimensions": fallback.get("dimensions"),
+                    "limit": fallback.get("limit"),
+                    "sort_field": fallback.get("sort_field"),
                     "group_by": fallback.get("group_by"),
                 },
             )
@@ -1266,6 +1310,13 @@ class SalesWorkflow:
                     {
                         "waro.planner.source": str(validated.get("source", "")),
                         "waro.answer.style": str(validated.get("answer_style", "")),
+                        "waro.request.kind": str(validated.get("request_kind", "")),
+                        "waro.analysis.area": str(validated.get("area", "")),
+                        "waro.analysis.dimensions": ",".join(
+                            str(item) for item in validated.get("dimensions", [])
+                        ),
+                        "waro.request.limit": int(validated.get("limit", 0) or 0),
+                        "waro.sort.field": str(validated.get("sort_field") or ""),
                         "waro.group_by": str(validated.get("group_by") or ""),
                         "waro.period.date_from": str(validated["period"]["date_from"]),
                         "waro.period.date_to": str(validated["period"]["date_to"]),
@@ -1307,6 +1358,11 @@ class SalesWorkflow:
                         "error_type": type(exc).__name__,
                         "period": fallback.get("period"),
                         "answer_style": fallback.get("answer_style"),
+                        "request_kind": fallback.get("request_kind"),
+                        "area": fallback.get("area"),
+                        "dimensions": fallback.get("dimensions"),
+                        "limit": fallback.get("limit"),
+                        "sort_field": fallback.get("sort_field"),
                     },
                 )
                 return fallback
@@ -1318,6 +1374,11 @@ class SalesWorkflow:
                     "source": validated.get("source"),
                     "period": validated.get("period"),
                     "answer_style": validated.get("answer_style"),
+                    "request_kind": validated.get("request_kind"),
+                    "area": validated.get("area"),
+                    "dimensions": validated.get("dimensions"),
+                    "limit": validated.get("limit"),
+                    "sort_field": validated.get("sort_field"),
                     "group_by": validated.get("group_by"),
                     "confidence": validated.get("confidence"),
                     "tools": [
@@ -1346,6 +1407,14 @@ class SalesWorkflow:
             span.set_attribute("waro.resolver.source", str(validated.get("source", "")))
             span.set_attribute("waro.resolver.confidence", float(validated.get("confidence", 0)))
             span.set_attribute("waro.answer.style", str(validated.get("answer_style", "")))
+            span.set_attribute("waro.request.kind", str(validated.get("request_kind", "")))
+            span.set_attribute("waro.analysis.area", str(validated.get("area", "")))
+            span.set_attribute(
+                "waro.analysis.dimensions",
+                ",".join(str(item) for item in validated.get("dimensions", [])),
+            )
+            span.set_attribute("waro.request.limit", int(validated.get("limit", 0) or 0))
+            span.set_attribute("waro.sort.field", str(validated.get("sort_field") or ""))
             span.set_attribute("waro.group_by", str(validated.get("group_by") or ""))
             span.set_attribute("waro.period.date_from", str(validated["period"]["date_from"]))
             span.set_attribute("waro.period.date_to", str(validated["period"]["date_to"]))
@@ -1486,7 +1555,12 @@ class SalesWorkflow:
             }
         )
         highlights = self._highlights(metrics)
-        auxiliary_context = self._auxiliary_context(tool_calls)
+        requested_limit = self._semantic_limit_from_plan(semantic_plan, default=10)
+        auxiliary_context = self._auxiliary_context(
+            tool_calls,
+            product_limit=requested_limit,
+            customer_limit=requested_limit,
+        )
         analysis_request = self._analysis_request_context(
             request=request,
             answer_style=answer_style,
@@ -1494,6 +1568,7 @@ class SalesWorkflow:
             metrics=metrics,
             auxiliary_context=auxiliary_context,
             tool_calls=tool_calls,
+            semantic_plan=semantic_plan,
         )
         financial_analysis = self._financial_analysis_context(
             metrics=metrics,
@@ -1591,6 +1666,35 @@ class SalesWorkflow:
         group_by = request.group_by
         if group_by is None and self._needs_daily_breakdown(normalized):
             group_by = "date"
+        answer_style = self._resolve_answer_style(request.question)
+        request_kind = self._guardrail_request_kind(
+            normalized=normalized,
+            request_kind=None,
+            answer_style=answer_style,
+            group_by=group_by,
+            dimensions=[],
+        )
+        area = self._guardrail_area(
+            normalized=normalized,
+            area=None,
+            request_kind=request_kind,
+            answer_style=answer_style,
+        )
+        dimensions = self._guardrail_dimensions(
+            normalized=normalized,
+            dimensions=[],
+            request_kind=request_kind,
+        )
+        requested_metrics = self._guardrail_requested_metrics(
+            normalized=normalized,
+            requested_metrics=[],
+            request_kind=request_kind,
+        )
+        sort_field = self._guardrail_sort_field(
+            normalized=normalized,
+            request_kind=request_kind,
+            sort_field=None,
+        )
         return {
             "intent": self._resolve_sales_intent(
                 request.question,
@@ -1598,12 +1702,33 @@ class SalesWorkflow:
             ),
             "period": period,
             "group_by": group_by,
-            "answer_style": self._resolve_answer_style(request.question),
+            "answer_style": answer_style,
+            "request_kind": request_kind,
+            "area": area,
+            "objective": self._analysis_objective(
+                normalized=normalized,
+                area=area,
+                answer_style=answer_style,
+            ),
+            "dimensions": dimensions,
+            "requested_metrics": requested_metrics,
+            "limit": self._requested_limit_from_question(normalized, default=20),
+            "sort_field": sort_field,
             "tools": [{"name": "waro.sales.metrics", "reason": "fallback_default"}],
             "confidence": 0.55,
             "reason": "deterministic_fallback",
             "source": "deterministic_fallback",
         }
+
+    def _requested_limit_from_question(self, normalized: str, *, default: int) -> int:
+        match = re.search(r"\b(?:top|primer[oa]s?|los|las)?\s*(?P<count>\d{1,2})\b", normalized)
+        if not match:
+            return default
+        try:
+            limit = int(match.group("count"))
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(limit, 50))
 
     def _parse_planner_json(self, content: str) -> dict[str, Any]:
         text = content.strip()
@@ -1626,6 +1751,40 @@ class SalesWorkflow:
         normalized = self._normalize_question(request.question)
         allowed_styles = {"direct_metric", "business_analysis", "financial_analysis", "diagnostic"}
         allowed_groups = {"date", "weekday", "hour", "product", "payment", "ticket"}
+        allowed_request_kinds = {
+            "direct_metric",
+            "business_analysis",
+            "financial_analysis",
+            "product_ranking",
+            "customer_ranking",
+            "daily_analysis",
+            "diagnostic",
+        }
+        allowed_areas = {"commercial", "finance", "menu", "customers"}
+        allowed_dimensions = {"overall", "date", "product", "customer", "category", "hour"}
+        allowed_metrics = {
+            "sales",
+            "average_ticket",
+            "quantity_sold",
+            "revenue",
+            "gross_profit",
+            "gross_margin",
+            "product_profit",
+            "product_ranking",
+            "frequency",
+            "customer_activity",
+            "retention",
+        }
+        allowed_sort_fields = {
+            "quantity",
+            "revenue",
+            "margin",
+            "cost",
+            "order_count",
+            "total_spent",
+            "avg_ticket",
+            "last_order_date",
+        }
         intent = plan.get("intent") if plan.get("intent") in {"small_talk", "sales_metrics"} else fallback["intent"]
         answer_style = (
             plan.get("answer_style")
@@ -1668,17 +1827,205 @@ class SalesWorkflow:
             confidence = fallback.get("confidence", 0.55)
         confidence = max(0.0, min(1.0, float(confidence)))
         tools = plan.get("tools") if isinstance(plan.get("tools"), list) else fallback["tools"]
+        request_kind = (
+            str(plan.get("request_kind"))
+            if plan.get("request_kind") in allowed_request_kinds
+            else None
+        )
+        area = str(plan.get("area")) if plan.get("area") in allowed_areas else None
+        dimensions = self._validated_string_list(plan.get("dimensions"), allowed_dimensions)
+        requested_metrics = self._validated_string_list(
+            plan.get("requested_metrics"),
+            allowed_metrics,
+        )
+        sort_field = (
+            str(plan.get("sort_field"))
+            if plan.get("sort_field") in allowed_sort_fields
+            else None
+        )
+        limit = self._validated_limit(plan.get("limit"), fallback=20)
+        request_kind = self._guardrail_request_kind(
+            normalized=normalized,
+            request_kind=request_kind,
+            answer_style=answer_style,
+            group_by=group_by,
+            dimensions=dimensions,
+        )
+        area = self._guardrail_area(
+            normalized=normalized,
+            area=area,
+            request_kind=request_kind,
+            answer_style=answer_style,
+        )
+        dimensions = self._guardrail_dimensions(
+            normalized=normalized,
+            dimensions=dimensions,
+            request_kind=request_kind,
+        )
+        requested_metrics = self._guardrail_requested_metrics(
+            normalized=normalized,
+            requested_metrics=requested_metrics,
+            request_kind=request_kind,
+        )
+        sort_field = self._guardrail_sort_field(
+            normalized=normalized,
+            request_kind=request_kind,
+            sort_field=sort_field,
+        )
         return {
             "intent": intent,
             "period": period,
             "group_by": group_by,
             "answer_style": answer_style,
+            "request_kind": request_kind,
+            "area": area,
+            "objective": str(plan.get("objective") or "")[:120],
+            "dimensions": dimensions,
+            "requested_metrics": requested_metrics,
+            "limit": limit,
+            "sort_field": sort_field,
             "tools": sanitize_value(tools),
             "confidence": confidence,
             "reason": str(plan.get("reason") or fallback["reason"])[:300],
             "source": "llm_structured" if period_source == "llm" else period_source,
             "period_source": period_source,
         }
+
+    def _validated_string_list(self, value: Any, allowed: set[str]) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        output = []
+        for item in value:
+            if isinstance(item, str) and item in allowed and item not in output:
+                output.append(item)
+        return output
+
+    def _validated_limit(self, value: Any, *, fallback: int) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return max(1, min(limit, 50))
+
+    def _guardrail_request_kind(
+        self,
+        *,
+        normalized: str,
+        request_kind: str | None,
+        answer_style: str,
+        group_by: str | None,
+        dimensions: list[str],
+    ) -> str:
+        if self._looks_like_customer_question(normalized):
+            return "customer_ranking"
+        if self._looks_like_product_ranking(normalized) or (
+            request_kind == "product_ranking" and "product" in dimensions
+        ):
+            return "product_ranking"
+        if group_by == "date" or self._needs_daily_breakdown(normalized):
+            return "daily_analysis"
+        if answer_style == "financial_analysis":
+            return "financial_analysis"
+        if answer_style == "direct_metric":
+            return "direct_metric"
+        return request_kind or "business_analysis"
+
+    def _guardrail_area(
+        self,
+        *,
+        normalized: str,
+        area: str | None,
+        request_kind: str,
+        answer_style: str,
+    ) -> str:
+        if request_kind == "customer_ranking" or self._looks_like_customer_question(normalized):
+            return "customers"
+        if answer_style == "financial_analysis":
+            return "finance"
+        if request_kind == "product_ranking" or self._looks_like_product_ranking(normalized):
+            return "menu"
+        return area or "commercial"
+
+    def _guardrail_dimensions(
+        self,
+        *,
+        normalized: str,
+        dimensions: list[str],
+        request_kind: str,
+    ) -> list[str]:
+        output = ["overall", *dimensions]
+        if request_kind == "product_ranking" or self._looks_like_product_ranking(normalized):
+            output.append("product")
+        if request_kind == "financial_analysis":
+            output.append("product")
+        if request_kind == "customer_ranking" or self._looks_like_customer_question(normalized):
+            output.append("customer")
+        if request_kind == "daily_analysis" or self._needs_daily_breakdown(normalized):
+            output.append("date")
+        return list(dict.fromkeys(output))
+
+    def _guardrail_requested_metrics(
+        self,
+        *,
+        normalized: str,
+        requested_metrics: list[str],
+        request_kind: str,
+    ) -> list[str]:
+        output = list(requested_metrics)
+        if request_kind == "product_ranking":
+            output.extend(["quantity_sold", "revenue", "product_ranking"])
+        if request_kind == "customer_ranking":
+            output.extend(["frequency", "customer_activity"])
+        if request_kind == "daily_analysis":
+            output.extend(["sales"])
+        if re.search(r"\b(ventas?|ingresos?)\b", normalized):
+            output.append("sales")
+        return list(dict.fromkeys(output))
+
+    def _guardrail_sort_field(
+        self,
+        *,
+        normalized: str,
+        request_kind: str,
+        sort_field: str | None,
+    ) -> str | None:
+        if request_kind == "customer_ranking":
+            if re.search(r"\b(frecuencia|frecuentes?|compran|compras|ordenes?)\b", normalized):
+                return "order_count"
+            return sort_field if sort_field in {"order_count", "total_spent", "avg_ticket", "last_order_date"} else "total_spent"
+        if request_kind == "product_ranking":
+            if re.search(r"\b(margen|rentabilidad|rentables?|peor(?:es)?)\b", normalized):
+                return "margin"
+            if re.search(r"\b(ganancia|ganancias|utilidad|utilidades|profit)\b", normalized):
+                return "revenue"
+            if re.search(r"\b(cantidad|unidades|vendid[oa]s?|mas vendidos?)\b", normalized):
+                return "quantity"
+            return sort_field if sort_field in {"quantity", "revenue", "margin", "cost"} else "quantity"
+        return sort_field
+
+    def _looks_like_product_ranking(self, normalized: str) -> bool:
+        return bool(
+            re.search(r"\b(productos?|platos?|items?)\b", normalized)
+            and re.search(
+                r"\b(top|mayor(?:es)?|mejor(?:es)?|peor(?:es)?|menor(?:es)?|mas|"
+                r"vendid[oa]s?|cantidad|unidades|ranking)\b",
+                normalized,
+            )
+        )
+
+    def _looks_like_customer_question(self, normalized: str) -> bool:
+        typo_tolerant = normalized.replace("cleintes", "clientes").replace(
+            "conmayotr",
+            "con mayor",
+        )
+        return bool(
+            re.search(r"\b(clientes?|compradores?)\b", typo_tolerant)
+            and re.search(
+                r"\b(frecuencia|frecuentes?|mejores?|top|mayor(?:es)?|mas|"
+                r"compran|compras|gasto|ticket|ranking)\b",
+                typo_tolerant,
+            )
+        )
 
     def _resolve_contextual_sales_plan(
         self,
@@ -1930,7 +2277,11 @@ class SalesWorkflow:
             return {"date_from": value, "date_to": value}
         if re.search(r"\bmes\s+pasad[oa]\b", normalized):
             return self._previous_month_period(today)
-        if re.search(r"\b(este mes|del mes|mes actual|month to date|mtd)\b", normalized):
+        if re.search(
+            r"\b(este mes|del mes|dle mes|mes actual|mes presente|presente mes|"
+            r"presnete mes|month to date|mtd)\b",
+            normalized,
+        ):
             start = today.replace(day=1)
             return {"date_from": start.isoformat(), "date_to": today.isoformat()}
         if re.search(r"\b(esta semana|semana actual)\b", normalized):
@@ -2130,10 +2481,30 @@ class SalesWorkflow:
                 return result
         return {}
 
-    def _auxiliary_context(self, tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    def _semantic_limit_from_plan(
+        self,
+        semantic_plan: dict[str, Any] | None,
+        *,
+        default: int,
+    ) -> int:
+        try:
+            limit = int((semantic_plan or {}).get("limit", default))
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(limit, 50))
+
+    def _auxiliary_context(
+        self,
+        tool_calls: list[dict[str, Any]],
+        *,
+        product_limit: int = 10,
+        customer_limit: int = 10,
+    ) -> dict[str, Any]:
         financial_rows = self._rows_for(tool_calls, "waro.financial.products")
         financial_result = self._result_for(tool_calls, "waro.financial.products")
         menu_rows = self._rows_for(tool_calls, "waro.menu.products")
+        customer_rows = self._rows_for(tool_calls, "waro.customers.list")
+        customer_metrics = self._result_for(tool_calls, "waro.customers.metrics")
         context: dict[str, Any] = {}
         if financial_result:
             context["financial_metrics"] = sanitize_value(financial_result.get("metrics", {}))
@@ -2155,7 +2526,7 @@ class SalesWorkflow:
                     "price": row.get("price"),
                     "classification": row.get("classification"),
                 }
-                for row in financial_rows[:10]
+                for row in financial_rows[:product_limit]
             ]
         if menu_rows:
             context["menu_products"] = [
@@ -2168,6 +2539,26 @@ class SalesWorkflow:
                 }
                 for row in menu_rows[:10]
             ]
+        if customer_metrics:
+            context["customer_metrics"] = sanitize_value(customer_metrics.get("data", customer_metrics))
+        if customer_rows:
+            context["customers"] = [
+                {
+                    "id": row.get("id") or row.get("customer_id"),
+                    "name": row.get("name") or row.get("customer_name"),
+                    "phone": row.get("phone"),
+                    "email": row.get("email"),
+                    "order_count": row.get("order_count")
+                    if row.get("order_count") is not None
+                    else row.get("orders"),
+                    "total_spent": row.get("total_spent")
+                    if row.get("total_spent") is not None
+                    else row.get("revenue"),
+                    "avg_ticket": row.get("avg_ticket"),
+                    "last_order_date": row.get("last_order_date"),
+                }
+                for row in customer_rows[:customer_limit]
+            ]
         return sanitize_value(context)
 
     def _analysis_request_context(
@@ -2179,16 +2570,41 @@ class SalesWorkflow:
         metrics: dict[str, Any],
         auxiliary_context: dict[str, Any],
         tool_calls: list[dict[str, Any]],
+        semantic_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized = self._normalize_question(request.question)
-        area = self._analysis_area(normalized=normalized, answer_style=answer_style)
-        dimensions = self._analysis_dimensions(normalized=normalized, area=area)
-        requested_metrics = self._analysis_metrics(
+        semantic_area = (semantic_plan or {}).get("area")
+        semantic_dimensions = (semantic_plan or {}).get("dimensions")
+        semantic_metrics = (semantic_plan or {}).get("requested_metrics")
+        semantic_request_kind = (semantic_plan or {}).get("request_kind")
+        semantic_limit = self._semantic_limit_from_plan(semantic_plan, default=20)
+        area = (
+            str(semantic_area)
+            if semantic_area in {"commercial", "finance", "menu", "customers"}
+            else self._analysis_area(normalized=normalized, answer_style=answer_style)
+        )
+        dimensions = (
+            [str(item) for item in semantic_dimensions if isinstance(item, str)]
+            if isinstance(semantic_dimensions, list) and semantic_dimensions
+            else self._analysis_dimensions(normalized=normalized, area=area)
+        )
+        requested_metrics = (
+            [str(item) for item in semantic_metrics if isinstance(item, str)]
+            if isinstance(semantic_metrics, list) and semantic_metrics
+            else self._analysis_metrics(
             normalized=normalized,
             area=area,
             metrics=metrics,
             auxiliary_context=auxiliary_context,
+            )
         )
+        objective = str((semantic_plan or {}).get("objective") or "").strip()
+        if not objective:
+            objective = self._analysis_objective(
+                normalized=normalized,
+                area=area,
+                answer_style=answer_style,
+            )
         data_available = self._analysis_data_available(
             metrics=metrics,
             auxiliary_context=auxiliary_context,
@@ -2200,14 +2616,12 @@ class SalesWorkflow:
                 if answer_style in {"business_analysis", "financial_analysis", "diagnostic"}
                 else "metric_lookup",
                 "area": area,
-                "objective": self._analysis_objective(
-                    normalized=normalized,
-                    area=area,
-                    answer_style=answer_style,
-                ),
+                "objective": objective,
+                "request_kind": semantic_request_kind,
                 "period": period,
                 "dimensions": dimensions,
                 "requested_metrics": requested_metrics,
+                "limit": semantic_limit,
                 "data_available": data_available,
                 "depth": self._analysis_depth(normalized),
                 "missing_data_policy": "state_limitations",
@@ -2302,8 +2716,7 @@ class SalesWorkflow:
             "product_margin": bool(auxiliary_context.get("financial_metrics")),
             "food_cost": "waro.analytics.food_cost" in tool_names,
             "menu": "waro.menu.products" in tool_names or "waro.analytics.menu" in tool_names,
-            "customers": "waro.customers.metrics" in tool_names
-            or "waro.customers.list" in tool_names,
+            "customers": bool(auxiliary_context.get("customers")),
             "labor_cost": False,
             "fixed_expenses": False,
             "inventory": False,
@@ -2385,6 +2798,17 @@ class SalesWorkflow:
         dimensions = analysis_request.get("dimensions")
         objective = analysis_request.get("objective")
         area = analysis_request.get("area")
+        semantic_kind = analysis_request.get("request_kind")
+        if semantic_kind in {
+            "direct_metric",
+            "business_analysis",
+            "financial_analysis",
+            "product_ranking",
+            "customer_ranking",
+            "daily_analysis",
+            "diagnostic",
+        }:
+            return str(semantic_kind)
         if isinstance(dimensions, list) and "product" in dimensions and objective == "rank_entities":
             return "product_ranking"
         if isinstance(dimensions, list) and "customer" in dimensions:
@@ -2606,6 +3030,8 @@ class SalesWorkflow:
                 return error_message
         if answer_style != "direct_metric" and self._is_product_analysis_artifact(artifact):
             return self._build_product_fallback_summary(artifact)
+        if answer_style != "direct_metric" and response_contract.get("request_kind") == "customer_ranking":
+            return self._build_customer_fallback_summary(artifact)
         if answer_style != "direct_metric" and response_contract.get("request_kind") == "daily_analysis":
             return self._build_daily_fallback_summary(artifact)
         if answer_style == "direct_metric":
@@ -2643,6 +3069,8 @@ class SalesWorkflow:
             isinstance(dimensions, list)
             and "product" in dimensions
             and (
+                analysis_request.get("request_kind") == "product_ranking"
+                or
                 analysis_request.get("objective") == "rank_entities"
                 or (
                     isinstance(requested_metrics, list)
@@ -2692,15 +3120,19 @@ class SalesWorkflow:
                 "la consulta no devolvio datos de producto."
             )
 
+        analysis_request = (
+            artifact.get("analysis_request")
+            if isinstance(artifact.get("analysis_request"), dict)
+            else {}
+        )
+        limit = self._summary_limit(analysis_request, default=5)
+        sort_field = self._product_summary_sort_field(analysis_request)
         ranked = sorted(
             [product for product in products if isinstance(product, dict)],
-            key=lambda product: self._numeric_value(product.get("quantity"))
-            or self._numeric_value(product.get("revenue"))
-            or self._numeric_value(product.get("profit"))
-            or 0,
+            key=lambda product: self._product_summary_sort_value(product, sort_field),
             reverse=True,
-        )[:5]
-        lines = [f"No pude generar el analisis completo, pero encontre estos productos para {label}:"]
+        )[:limit]
+        lines = [f"Productos mas relevantes para {label}:"]
         for index, product in enumerate(ranked, start=1):
             name = str(product.get("name") or "Producto sin nombre")
             details = []
@@ -2713,6 +3145,100 @@ class SalesWorkflow:
                 details.append(f"{self._format_cop(revenue)} en ventas")
             if profit is not None:
                 details.append(f"{self._format_cop(profit)} de ganancia bruta")
+            suffix = f" ({', '.join(details)})" if details else ""
+            lines.append(f"{index}. {name}{suffix}")
+        return "\n".join(lines)
+
+    def _summary_limit(self, analysis_request: dict[str, Any], *, default: int) -> int:
+        try:
+            limit = int(analysis_request.get("limit", default))
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(limit, 50))
+
+    def _product_summary_sort_field(self, analysis_request: dict[str, Any]) -> str:
+        requested_metrics = analysis_request.get("requested_metrics")
+        if isinstance(requested_metrics, list):
+            if "quantity_sold" in requested_metrics or "product_ranking" in requested_metrics:
+                return "quantity"
+            if "product_profit" in requested_metrics or "gross_profit" in requested_metrics:
+                return "profit"
+            if "revenue" in requested_metrics or "sales" in requested_metrics:
+                return "revenue"
+        return "quantity"
+
+    def _product_summary_sort_value(self, product: dict[str, Any], sort_field: str) -> float:
+        if sort_field == "profit":
+            return self._numeric_value(product.get("profit")) or 0
+        if sort_field == "revenue":
+            return self._numeric_value(product.get("revenue")) or 0
+        if sort_field == "margin":
+            return self._numeric_value(product.get("margin")) or 0
+        return (
+            self._numeric_value(product.get("quantity"))
+            or self._numeric_value(product.get("revenue"))
+            or self._numeric_value(product.get("profit"))
+            or 0
+        )
+
+    def _build_customer_fallback_summary(self, artifact: dict[str, Any]) -> str:
+        auxiliary_context = (
+            artifact.get("auxiliary_context")
+            if isinstance(artifact.get("auxiliary_context"), dict)
+            else {}
+        )
+        customers = (
+            auxiliary_context.get("customers")
+            if isinstance(auxiliary_context.get("customers"), list)
+            else []
+        )
+        period = artifact.get("period") if isinstance(artifact.get("period"), dict) else {}
+        label = self._period_label(period)
+        if not customers:
+            failed_customer_tools = [
+                call.get("tool_name")
+                for call in artifact.get("tool_calls", [])
+                if isinstance(call, dict)
+                and call.get("tool_name") in {"waro.customers.metrics", "waro.customers.list"}
+                and call.get("status") != "succeeded"
+            ]
+            if failed_customer_tools:
+                tools = ", ".join(str(tool) for tool in failed_customer_tools)
+                return (
+                    f"No pude completar el ranking de clientes para {label}. "
+                    f"Fallo la consulta de datos de clientes: {tools}."
+                )
+            return (
+                f"No pude completar el ranking de clientes para {label}: "
+                "la consulta no devolvio datos de clientes."
+            )
+
+        analysis_request = (
+            artifact.get("analysis_request")
+            if isinstance(artifact.get("analysis_request"), dict)
+            else {}
+        )
+        limit = self._summary_limit(analysis_request, default=10)
+        ranked = sorted(
+            [customer for customer in customers if isinstance(customer, dict)],
+            key=lambda customer: self._numeric_value(customer.get("order_count"))
+            or self._numeric_value(customer.get("total_spent"))
+            or 0,
+            reverse=True,
+        )[:limit]
+        lines = [f"Clientes con mayor frecuencia para {label}:"]
+        for index, customer in enumerate(ranked, start=1):
+            name = str(customer.get("name") or customer.get("phone") or "Cliente sin nombre")
+            details = []
+            order_count = self._numeric_value(customer.get("order_count"))
+            total_spent = self._numeric_value(customer.get("total_spent"))
+            avg_ticket = self._numeric_value(customer.get("avg_ticket"))
+            if order_count is not None:
+                details.append(f"{order_count:g} ordenes")
+            if total_spent is not None:
+                details.append(f"{self._format_cop(total_spent)} comprado")
+            if avg_ticket is not None:
+                details.append(f"ticket {self._format_cop(avg_ticket)}")
             suffix = f" ({', '.join(details)})" if details else ""
             lines.append(f"{index}. {name}{suffix}")
         return "\n".join(lines)
