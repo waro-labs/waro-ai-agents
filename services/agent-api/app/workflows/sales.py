@@ -2578,6 +2578,7 @@ class SalesWorkflow:
         semantic_metrics = (semantic_plan or {}).get("requested_metrics")
         semantic_request_kind = (semantic_plan or {}).get("request_kind")
         semantic_limit = self._semantic_limit_from_plan(semantic_plan, default=20)
+        semantic_sort_field = (semantic_plan or {}).get("sort_field")
         area = (
             str(semantic_area)
             if semantic_area in {"commercial", "finance", "menu", "customers"}
@@ -2622,6 +2623,7 @@ class SalesWorkflow:
                 "dimensions": dimensions,
                 "requested_metrics": requested_metrics,
                 "limit": semantic_limit,
+                "sort_field": semantic_sort_field,
                 "data_available": data_available,
                 "depth": self._analysis_depth(normalized),
                 "missing_data_policy": "state_limitations",
@@ -3157,14 +3159,19 @@ class SalesWorkflow:
         return max(1, min(limit, 50))
 
     def _product_summary_sort_field(self, analysis_request: dict[str, Any]) -> str:
+        sort_field = analysis_request.get("sort_field")
+        if sort_field in {"quantity", "revenue", "margin", "cost"}:
+            return str(sort_field)
         requested_metrics = analysis_request.get("requested_metrics")
         if isinstance(requested_metrics, list):
-            if "quantity_sold" in requested_metrics or "product_ranking" in requested_metrics:
-                return "quantity"
             if "product_profit" in requested_metrics or "gross_profit" in requested_metrics:
                 return "profit"
+            if "gross_margin" in requested_metrics:
+                return "margin"
             if "revenue" in requested_metrics or "sales" in requested_metrics:
                 return "revenue"
+            if "quantity_sold" in requested_metrics or "product_ranking" in requested_metrics:
+                return "quantity"
         return "quantity"
 
     def _product_summary_sort_value(self, product: dict[str, Any], sort_field: str) -> float:
@@ -3173,7 +3180,14 @@ class SalesWorkflow:
         if sort_field == "revenue":
             return self._numeric_value(product.get("revenue")) or 0
         if sort_field == "margin":
-            return self._numeric_value(product.get("margin")) or 0
+            return (
+                self._numeric_value(product.get("margin"))
+                or self._numeric_value(product.get("gross_margin"))
+                or self._numeric_value(product.get("profit"))
+                or 0
+            )
+        if sort_field == "cost":
+            return self._numeric_value(product.get("cost")) or 0
         return (
             self._numeric_value(product.get("quantity"))
             or self._numeric_value(product.get("revenue"))

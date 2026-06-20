@@ -280,6 +280,39 @@ def test_sales_workflow_product_fallback_respects_requested_limit():
     assert "vendiste" not in summary
 
 
+def test_sales_workflow_product_fallback_respects_profitability_sort_field():
+    workflow = SalesWorkflow(settings=Settings())
+
+    summary = workflow._build_summary(
+        {
+            "intent": "sales_metrics",
+            "answer_style": "business_analysis",
+            "period": {"date_from": "2026-06-01", "date_to": "2026-06-20"},
+            "metrics": {"total_sales": 10107000, "order_count": 393},
+            "analysis_request": {
+                "request_kind": "product_ranking",
+                "objective": "rank_entities",
+                "dimensions": ["overall", "product"],
+                "requested_metrics": ["quantity_sold", "product_ranking"],
+                "sort_field": "margin",
+                "limit": 2,
+            },
+            "auxiliary_context": {
+                "financial_products": [
+                    {"name": "Muchas unidades", "quantity": 100, "profit": 10000},
+                    {"name": "Mas rentable", "quantity": 3, "profit": 90000},
+                    {"name": "Rentable medio", "quantity": 5, "profit": 50000},
+                ]
+            },
+            "tool_calls": [],
+        }
+    )
+
+    assert summary.splitlines()[1].startswith("1. Mas rentable")
+    assert summary.splitlines()[2].startswith("2. Rentable medio")
+    assert "Muchas unidades" not in summary
+
+
 def test_sales_workflow_customer_fallback_does_not_return_generic_sales_summary():
     workflow = SalesWorkflow(settings=Settings())
 
