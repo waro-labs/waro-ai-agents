@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from app.agent.intent import QuestionIntent, normalize_measure, normalize_text
@@ -21,6 +21,7 @@ class ToolCapability:
     supports_period: bool
     default_fields: tuple[str, ...]
     arguments_schema: dict[str, Any]
+    planning_hints: dict[str, Any] = field(default_factory=dict)
     response_contract: dict[str, Any] | None = None
     can_answer_patterns: tuple[str, ...] = ()
     cannot_answer_patterns: tuple[str, ...] = ()
@@ -72,6 +73,7 @@ def capability_from_spec(
         supports_period=bool(raw.get("supports_period", False)),
         default_fields=tuple(response_contract.default_fields if response_contract else spec.default_fields),
         arguments_schema=arguments_schema or spec.args_model.model_json_schema(by_alias=True),
+        planning_hints=raw,
         response_contract=(
             {
                 "shape": response_contract.shape,

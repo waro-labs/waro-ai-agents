@@ -38,6 +38,13 @@ class AgentProfile:
             return set()
         return {str(item) for item in values if item}
 
+    def group_selector(self, name: str) -> dict[str, Any]:
+        selectors = self.analysis.get("tool_group_selectors")
+        if not isinstance(selectors, dict):
+            return {}
+        selector = selectors.get(name)
+        return selector if isinstance(selector, dict) else {}
+
     @property
     def signals(self) -> tuple[dict[str, Any], ...]:
         values = self.analysis.get("signals")
@@ -103,9 +110,10 @@ def rows_for_group(
     if profile is None:
         return []
     tool_names = profile.tool_group(group)
+    selector = profile.group_selector(group)
     rows: list[dict[str, Any]] = []
     for table in tables:
-        if table.get("tool") not in tool_names:
+        if table.get("tool") not in tool_names and not _matches_selector(table, selector):
             continue
         for row in table.get("rows") or []:
             if isinstance(row, dict):
@@ -129,3 +137,25 @@ def _set(value: Any) -> set[str]:
     if not isinstance(value, list):
         return set()
     return {str(item) for item in value if item}
+
+
+def _matches_selector(table: dict[str, Any], selector: dict[str, Any]) -> bool:
+    if not selector:
+        return False
+    evidence = {
+        normalize_text(str(item)).replace(" ", "_")
+        for item in table.get("expected_evidence") or []
+        if item is not None
+    }
+    if not evidence:
+        return False
+    all_values = _set(selector.get("all"))
+    any_values = _set(selector.get("any"))
+    none_values = _set(selector.get("none"))
+    if all_values and not all_values.issubset(evidence):
+        return False
+    if any_values and not any_values.intersection(evidence):
+        return False
+    if none_values and none_values.intersection(evidence):
+        return False
+    return bool(all_values or any_values)

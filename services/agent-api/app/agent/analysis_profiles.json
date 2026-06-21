@@ -39,6 +39,23 @@
             "waro.analytics.waros"
           ]
         },
+        "tool_group_selectors": {
+          "products": {
+            "all": ["entity:product"],
+            "any": ["quantity_sold", "quantity", "revenue", "margin", "profit", "cost"]
+          },
+          "customers": {
+            "all": ["entity:customer"],
+            "any": ["order_count", "total_spent", "avg_ticket", "retention", "frequency"]
+          },
+          "cohorts": {
+            "any": ["cohort_size", "retention_pct", "grain:cohort_period"]
+          },
+          "loyalty": {
+            "all": ["entity:loyalty_transaction"],
+            "any": ["total_issued", "total_redeemed", "redemption_rate_pct"]
+          }
+        },
         "signals": [
           {
             "id": "high_volume_low_margin",

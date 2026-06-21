@@ -10,7 +10,7 @@ from app.agent.evidence import build_evidence_artifact, deterministic_evidence_s
 from app.agent.intent import coerce_intent, heuristic_intent, parse_question_intent, resolve_contextual_intent
 from app.agent.loop import AgentLoop
 from app.agent.plan import build_tool_plan
-from app.agent.profiles import profile_for_intent
+from app.agent.profiles import profile_for_intent, rows_for_group
 from app.agent.strategy import heuristic_answer_strategy
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
@@ -307,6 +307,8 @@ def _dynamic_capability(
     scope: str = "analytics:read",
     default_fields: tuple[str, ...] = ("data",),
     supports_period: bool = True,
+    arguments_schema: dict | None = None,
+    planning_hints: dict | None = None,
 ) -> ToolCapability:
     return ToolCapability(
         tool_name=tool_name,
@@ -319,7 +321,8 @@ def _dynamic_capability(
         operations=operations,
         supports_period=supports_period,
         default_fields=default_fields,
-        arguments_schema={},
+        arguments_schema=arguments_schema or {},
+        planning_hints=planning_hints or {},
     )
 
 
@@ -333,6 +336,14 @@ def test_capability_matcher_routes_waros_question_to_waros_tool():
         dimensions=("customer", "period"),
         operations=("aggregate", "group", "rank", "summarize"),
         default_fields=("groups", "summary"),
+        arguments_schema={
+            "properties": {
+                "group-by": {
+                    "enum": ["day", "week", "customer"],
+                    "type": "string",
+                }
+            }
+        },
     )
     customers = capability_from_spec(TOOL_SPECS["waro.customers.list"])
 
@@ -431,6 +442,23 @@ def test_business_analysis_plan_uses_multiple_capability_domains():
     ]
 
 
+def test_profile_groups_can_match_semantic_evidence_from_unknown_tools():
+    intent = heuristic_intent("diagnostico del negocio")
+    profile = profile_for_intent(intent)
+    rows = rows_for_group(
+        tables=[
+            {
+                "tool": "waro.experimental.product_rankings",
+                "expected_evidence": ["entity:product", "grain:product_period", "margin"],
+                "rows": [{"name": "Burger", "margin": 12}],
+            }
+        ],
+        profile=profile,
+        group="products",
+    )
+    assert rows == [{"name": "Burger", "margin": 12}]
+
+
 def test_capability_matcher_rejects_sales_list_for_product_margin():
     intent = heuristic_intent("Dime qué productos vendieron mucho este mes pero tienen bajo margen.")
     capabilities = [capability_from_spec(spec) for spec in TOOL_SPECS.values()]
@@ -467,6 +495,35 @@ def test_plan_validator_accepts_financial_and_food_cost_for_product_margin():
         "waro.financial.products",
         "waro.analytics.food_cost",
     }
+
+
+def test_plan_builds_arguments_from_schema_for_unknown_compatible_tool():
+    intent = heuristic_intent("dime los productos mas vendidos este mes")
+    capability = _dynamic_capability(
+        tool_name="waro.experimental.product_rankings",
+        entity="product",
+        grain="product_period",
+        measures=("quantity_sold", "revenue", "margin"),
+        dimensions=("product", "category"),
+        operations=("rank", "sort", "limit"),
+        scope="analytics:read",
+        arguments_schema={
+            "properties": {
+                "date-from": {"type": "string"},
+                "date-to": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "sort-by": {"type": "string", "enum": ["quantity", "revenue", "margin"]},
+            }
+        },
+        planning_hints={"default_rank": ["quantity"]},
+    )
+    matches = match_tools(intent, [capability], scopes=("analytics:read",))
+    plan = build_tool_plan(intent, matches)
+    assert plan.valid is True
+    assert plan.steps[0].tool_name == "waro.experimental.product_rankings"
+    assert plan.steps[0].arguments["limit"] == 20
+    assert plan.steps[0].arguments["sort-by"] == "quantity"
+    assert "date-from" in plan.steps[0].arguments
 
 
 def test_plan_validator_accepts_customer_frequency_vs_spend_without_revenue():
@@ -546,7 +603,7 @@ def test_product_ranking_summary_does_not_add_margin_when_not_requested():
         ],
     )
     summary = deterministic_evidence_summary(artifact)
-    assert "Productos mas vendidos" in summary
+    assert "Productos por unidades vendidas" in summary
     assert "bajo margen" not in summary
     assert "margen 12%" not in summary
     assert "50 unidades" in summary

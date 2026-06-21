@@ -283,6 +283,11 @@ def _table_from_observation(observation: dict[str, Any]) -> dict[str, Any]:
     return {
         "tool": observation.get("tool_name"),
         "status": observation.get("status"),
+        "expected_evidence": [
+            str(item)
+            for item in observation.get("expected_evidence") or []
+            if item is not None
+        ],
         "rows": _rows_from_result(result),
         "metrics": _metrics_from_result(result),
         "summary": observation.get("result_summary"),
@@ -620,18 +625,30 @@ def _customer_comparison_summary(rows: list[dict[str, Any]], period: str | None)
 
 def _product_title(measures: set[str], period: str | None) -> str:
     label = _period_label(period)
-    has_quantity = "quantity_sold" in measures
-    has_margin = "margin" in measures
-    has_revenue = bool({"revenue", "total_sales"}.intersection(measures))
-    if has_quantity and has_margin:
-        return f"Productos con alta venta y bajo margen para {label}:"
-    if has_quantity:
-        return f"Productos mas vendidos para {label}:"
-    if has_margin:
-        return f"Productos ordenados por margen para {label}:"
-    if has_revenue:
-        return f"Productos con mayor valor vendido para {label}:"
+    criteria = _measure_labels(
+        measures,
+        {
+            "quantity_sold": "unidades vendidas",
+            "quantity": "unidades vendidas",
+            "margin": "margen",
+            "profit_margin_pct": "margen",
+            "revenue": "valor vendido",
+            "total_sales": "valor vendido",
+            "cost": "costo",
+            "profit": "utilidad",
+        },
+    )
+    if criteria:
+        return f"Productos por {', '.join(criteria)} para {label}:"
     return f"Productos para {label}:"
+
+
+def _measure_labels(measures: set[str], labels: dict[str, str]) -> list[str]:
+    result: list[str] = []
+    for measure, label in labels.items():
+        if measure in measures and label not in result:
+            result.append(label)
+    return result
 
 
 def _dedupe_text_items(items: list[str]) -> list[str]:
@@ -653,10 +670,14 @@ def _exclude_seen(items: list[str], previous_summary: str) -> list[str]:
 
 
 def _profile_groups(profile) -> set[str]:
+    result: set[str] = set()
     groups = profile.analysis.get("tool_groups")
-    if not isinstance(groups, dict):
-        return set()
-    return {str(group) for group in groups if group}
+    if isinstance(groups, dict):
+        result.update(str(group) for group in groups if group)
+    selectors = profile.analysis.get("tool_group_selectors")
+    if isinstance(selectors, dict):
+        result.update(str(group) for group in selectors if group)
+    return result
 
 
 def _apply_signal(
