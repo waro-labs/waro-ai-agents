@@ -25,10 +25,27 @@ require_file() {
 ensure_waro_cli() {
   local cli="$REPO/services/agent-api/.local/bin/waro"
   local source_dir="$REPO/../waro-cli"
-  if [[ ! -x "$cli" ]] || ! "$cli" --help 2>/dev/null | grep -q 'agent-json' || ! "$cli" schema customers list 2>/dev/null | grep -q '"response"'; then
+  local marker="$REPO/services/agent-api/.local/bin/waro.gitrev"
+  local source_rev=""
+  local needs_build="false"
+  if [[ -f "$source_dir/Cargo.toml" ]]; then
+    (cd "$source_dir" && git pull origin main >/dev/null)
+    source_rev="$(cd "$source_dir" && git rev-parse HEAD)"
+  fi
+  if [[ ! -x "$cli" ]]; then
+    needs_build="true"
+  elif ! "$cli" --help 2>/dev/null | grep -q 'agent-json'; then
+    needs_build="true"
+  elif ! "$cli" schema customers list 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); fields=((d.get("response") or {}).get("fields") or []); raise SystemExit(0 if fields else 1)'; then
+    needs_build="true"
+  elif [[ -n "$source_rev" && "$(cat "$marker" 2>/dev/null || true)" != "$source_rev" ]]; then
+    needs_build="true"
+  fi
+  if [[ "$needs_build" == "true" ]]; then
     if [[ -f "$source_dir/Cargo.toml" ]]; then
       echo "WARO CLI no tiene contrato agent-json actualizado; reconstruyendo desde $source_dir..."
       (cd "$REPO/services/agent-api" && ./scripts/build-linux-waro-cli.sh --source "$source_dir")
+      [[ -n "$source_rev" ]] && echo "$source_rev" > "$marker"
     fi
   fi
   [[ -x "$cli" ]] || { echo "Falta WARO CLI ejecutable: $cli"; exit 1; }
@@ -36,7 +53,7 @@ ensure_waro_cli() {
     echo "WARO CLI en $cli no soporta --output agent-json. Reconstruye con: cd $REPO/services/agent-api && ./scripts/build-linux-waro-cli.sh --source $source_dir"
     exit 1
   }
-  "$cli" schema customers list 2>/dev/null | grep -q '"response"' || {
+  "$cli" schema customers list 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); fields=((d.get("response") or {}).get("fields") or []); raise SystemExit(0 if fields else 1)' || {
     echo "WARO CLI en $cli no expone response contracts en waro schema."
     exit 1
   }
