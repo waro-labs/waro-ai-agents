@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.agent.classifier import classify_complexity
 from app.agent.composer import compose_agent_summary, deterministic_summary
-from app.agent.conversation import load_conversation_messages
+from app.agent.conversation import load_conversation_messages, load_conversation_state
 from app.agent.loop import AgentLoop
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
@@ -48,6 +48,11 @@ class KaliAgentRunner:
             connection_factory=self.connection_factory,
             conversation_id=conversation_id,
         )
+        conversation_state = await load_conversation_state(
+            settings=self.settings,
+            connection_factory=self.connection_factory,
+            conversation_id=conversation_id,
+        )
         classification = await classify_complexity(
             settings=self.settings,
             llm_adapter=self.llm_adapter,
@@ -61,6 +66,7 @@ class KaliAgentRunner:
             run_id=run_id,
             complexity=complexity,
             conversation_messages=conversation_messages,
+            conversation_state=conversation_state.to_dict(),
             classification=classification,
         )
         artifact["classification"] = classification

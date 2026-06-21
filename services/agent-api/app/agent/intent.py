@@ -103,16 +103,23 @@ async def parse_question_intent(
     llm_adapter: LLMAdapter,
     question: str,
     conversation_messages: list[dict[str, str]] | None = None,
+    conversation_state: dict[str, Any] | None = None,
     capability_hints: list[dict[str, Any]] | None = None,
 ) -> QuestionIntent:
     vocabulary = vocabulary_from_capabilities(capability_hints or [])
-    fallback = heuristic_intent(question, capability_hints=capability_hints)
+    fallback = resolve_contextual_intent(
+        heuristic_intent(question, capability_hints=capability_hints),
+        question=question,
+        conversation_state=conversation_state,
+        source="heuristic_context",
+    )
     if settings.llm_provider == "disabled":
         return fallback
 
     payload = {
         "question": question,
         "conversation_messages": conversation_messages or [],
+        "conversation_state": conversation_state or {},
         "fallback_intent": fallback.to_dict(),
         "allowed": {
             "entity": sorted(vocabulary["entities"]),
@@ -148,6 +155,12 @@ async def parse_question_intent(
                 fallback=fallback,
                 source="llm",
                 allowed=vocabulary,
+            )
+            return resolve_contextual_intent(
+                intent,
+                question=question,
+                conversation_state=conversation_state,
+                source="llm_context",
             )
     except Exception:
         pass
@@ -308,6 +321,65 @@ def infer_time_range(normalized: str, *, today: date) -> TimeRange:
     return TimeRange(None, None, label="")
 
 
+def resolve_contextual_intent(
+    intent: QuestionIntent,
+    *,
+    question: str,
+    conversation_state: dict[str, Any] | None,
+    source: str | None = None,
+) -> QuestionIntent:
+    if not isinstance(conversation_state, dict) or not conversation_state:
+        return intent
+    if not _is_contextual_question(question):
+        return intent
+
+    active_entity = _string_or_none(conversation_state.get("active_entity"))
+    active_grain = _string_or_none(conversation_state.get("active_grain"))
+    active_period = conversation_state.get("active_period")
+    active_measures = _string_list(conversation_state.get("active_measures"))
+    active_dimensions = _string_list(conversation_state.get("active_dimensions"))
+
+    entity = intent.entity
+    grain = intent.grain
+    if active_entity and _intent_has_weak_entity_signal(intent, question):
+        entity = active_entity
+        grain = active_grain or intent.grain
+
+    time_range = intent.time_range
+    if not time_range.date_from and isinstance(active_period, dict):
+        date_from = _string_or_none(active_period.get("date_from"))
+        date_to = _string_or_none(active_period.get("date_to"))
+        if date_from or date_to:
+            time_range = TimeRange(
+                date_from=date_from,
+                date_to=date_to,
+                timezone=str(active_period.get("timezone") or time_range.timezone),
+                label=str(active_period.get("label") or time_range.label or "periodo anterior"),
+            )
+
+    measures = list(intent.measures)
+    if not measures and active_measures:
+        measures = active_measures
+    if entity == active_entity:
+        dimensions = _dedupe([*intent.dimensions, *active_dimensions])
+    else:
+        dimensions = list(intent.dimensions)
+
+    return QuestionIntent(
+        entity=entity,
+        grain=grain,
+        measures=tuple(normalize_measures_for_entity(entity, _dedupe(measures))),
+        dimensions=tuple(dimensions),
+        operations=intent.operations,
+        time_range=time_range,
+        answer_goal=intent.answer_goal,
+        requires_cross_tool=intent.requires_cross_tool or entity == "business",
+        confidence=intent.confidence,
+        ambiguities=intent.ambiguities,
+        source=source or intent.source,
+    )
+
+
 def coerce_intent(
     payload: dict[str, Any],
     *,
@@ -369,6 +441,41 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if item]
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_contextual_question(question: str) -> bool:
+    normalized = normalize_text(question)
+    return bool(
+        re.search(
+            r"\b(esto|eso|ese|esa|esos|esas|anterior|lo anterior|que mas|profundiza|detall|tienen|tiene|hacer con|que puedo hacer|acciones?|recomendaciones?)\b",
+            normalized,
+        )
+    )
+
+
+def _intent_has_weak_entity_signal(intent: QuestionIntent, question: str) -> bool:
+    normalized = normalize_text(question)
+    explicit_domains = (
+        "cliente",
+        "clientes",
+        "producto",
+        "productos",
+        "venta",
+        "ventas",
+        "waros",
+        "puntos",
+        "cohorte",
+        "cohortes",
+        "negocio",
+    )
+    return intent.entity in {"sale", "unknown"} and not any(token in normalized for token in explicit_domains)
 
 
 def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:

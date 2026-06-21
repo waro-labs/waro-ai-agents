@@ -15,6 +15,7 @@ def build_evidence_artifact(
     plan: ToolPlan,
     observations: list[dict[str, Any]],
     conversation_messages: list[dict[str, str]] | None = None,
+    conversation_state: dict[str, Any] | None = None,
     classification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = profile_for_intent(intent)
@@ -51,6 +52,8 @@ def build_evidence_artifact(
         ),
         "question": question,
         "question_intent": intent.to_dict(),
+        "conversation_state": conversation_state or {},
+        "context_usage": _context_usage(question=question, conversation_state=conversation_state),
         "classification": classification or {},
         "plan": plan.to_dict(),
         "tool_results": observations,
@@ -59,6 +62,14 @@ def build_evidence_artifact(
         "metrics": metrics,
         "ranked_rows": ranked_rows,
         "analysis": analysis,
+        "insights": [
+            *_string_items(analysis.get("facts")),
+            *_string_items(analysis.get("patterns")),
+            *_string_items(analysis.get("risks")),
+            *_string_items(analysis.get("opportunities")),
+        ],
+        "recommended_actions": _string_items(analysis.get("recommended_actions")),
+        "open_questions": _open_questions(intent, analysis),
         "evidence": _evidence(tables),
         "limitations": _limitations(plan, failed),
         "answerability": answerability,
@@ -86,6 +97,15 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
     metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
     rows = artifact.get("ranked_rows") if isinstance(artifact.get("ranked_rows"), list) else []
     period = intent.get("time_range", {}).get("label") if isinstance(intent.get("time_range"), dict) else ""
+    strategy_payload = artifact.get("answer_strategy") if isinstance(artifact.get("answer_strategy"), dict) else {}
+    strategy = str(strategy_payload.get("type") or "")
+
+    if strategy == "recommendation":
+        return _recommendation_summary(artifact, period)
+    if strategy == "diagnosis" and entity == "business":
+        return _business_analysis_summary(artifact, period)
+    if strategy == "comparison" and entity == "customer" and rows:
+        return _customer_comparison_summary(rows, period)
 
     if entity == "business":
         return _business_analysis_summary(artifact, period)
@@ -99,7 +119,7 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
     if entity == "product":
         if not rows:
             return "No encontre filas de productos suficientes para responder con ranking."
-        lines = ["Productos con alta venta y bajo margen:"]
+        lines = [_product_title(measures, period)]
         for index, row in enumerate(rows[:10], start=1):
             name = row.get("name") or row.get("product_name") or row.get("id") or "Producto"
             quantity = row.get("quantity") or row.get("quantity_sold") or row.get("total_units_sold")
@@ -110,7 +130,7 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
                 bits.append(f"{quantity} unidades")
             if revenue:
                 bits.append(f"{revenue} vendido")
-            if margin is not None:
+            if "margin" in measures and margin is not None:
                 bits.append(f"margen {margin}%")
             lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
         return "\n".join(lines)
@@ -219,6 +239,32 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
             lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
         return "\n".join(lines)
     return "Tengo datos suficientes, pero no pude generar un resumen especifico para esta consulta."
+
+
+def _context_usage(*, question: str, conversation_state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(conversation_state, dict) or conversation_state.get("source") in {None, "none"}:
+        return {"used": False, "reason": "no_context"}
+    normalized = question.lower()
+    refers_to_previous = any(
+        token in normalized
+        for token in ("esto", "eso", "anterior", "qué más", "que mas", "profundiza", "ese", "esa")
+    )
+    return {
+        "used": refers_to_previous,
+        "source": conversation_state.get("source"),
+        "active_entity": conversation_state.get("active_entity"),
+        "active_period": conversation_state.get("active_period"),
+    }
+
+
+def _open_questions(intent: QuestionIntent, analysis: dict[str, Any]) -> list[str]:
+    questions: list[str] = []
+    limitations = _string_items(analysis.get("limitations"))
+    if limitations:
+        questions.append("Validar las limitaciones de datos antes de tomar decisiones.")
+    if intent.entity == "business":
+        questions.append("Comparar el periodo contra un periodo anterior equivalente.")
+    return questions[:3]
 
 
 def _table_from_observation(observation: dict[str, Any]) -> dict[str, Any]:
@@ -466,6 +512,76 @@ def _business_analysis_summary(artifact: dict[str, Any], period: str | None) -> 
     if len(lines) == 1:
         lines.append("No encontre evidencia suficiente para identificar patrones profundos.")
     return "\n".join(lines)
+
+
+def _recommendation_summary(artifact: dict[str, Any], period: str | None) -> str:
+    analysis = artifact.get("analysis") if isinstance(artifact.get("analysis"), dict) else {}
+    context = artifact.get("conversation_state") if isinstance(artifact.get("conversation_state"), dict) else {}
+    facts = _string_items(analysis.get("facts"))[:3]
+    risks = _string_items(analysis.get("risks"))[:3]
+    opportunities = _string_items(analysis.get("opportunities"))[:3]
+    actions = _string_items(analysis.get("recommended_actions"))[:5]
+    if not actions:
+        actions = _string_items(context.get("prior_actions"))[:5]
+    if not actions and artifact.get("ranked_rows"):
+        actions = [
+            "Prioriza acciones sobre los segmentos o items con mayor concentracion en el ranking.",
+            "Separa casos atipicos antes de tomar decisiones comerciales.",
+        ]
+    lines = [f"Acciones recomendadas para {_period_label(period)}:"]
+    if facts:
+        lines.append("")
+        lines.append("Base de la recomendacion:")
+        lines.extend(f"- {item}" for item in facts)
+    if risks:
+        lines.append("")
+        lines.append("Riesgos a controlar:")
+        lines.extend(f"- {item}" for item in risks)
+    if opportunities:
+        lines.append("")
+        lines.append("Oportunidades:")
+        lines.extend(f"- {item}" for item in opportunities)
+    if actions:
+        lines.append("")
+        lines.append("Que haria:")
+        lines.extend(f"- {item}" for item in actions)
+    if len(lines) == 1:
+        lines.append("No encontre acciones suficientemente respaldadas por la evidencia disponible.")
+    return "\n".join(lines)
+
+
+def _customer_comparison_summary(rows: list[dict[str, Any]], period: str | None) -> str:
+    lines = [f"Comparacion de clientes para {_period_label(period)}:"]
+    for index, row in enumerate(rows[:20], start=1):
+        name = row.get("name") or row.get("customer_name") or row.get("customer_id") or "Cliente"
+        spent = _fmt_money(row.get("total_spent"))
+        orders = row.get("order_count")
+        avg = _fmt_money(row.get("avg_ticket"))
+        bits = []
+        if orders is not None:
+            bits.append(f"{orders} ordenes")
+        if spent:
+            bits.append(f"{spent} comprado")
+        if avg:
+            bits.append(f"ticket {avg}")
+        lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
+    return "\n".join(lines)
+
+
+def _product_title(measures: set[str], period: str | None) -> str:
+    label = _period_label(period)
+    has_quantity = "quantity_sold" in measures
+    has_margin = "margin" in measures
+    has_revenue = bool({"revenue", "total_sales"}.intersection(measures))
+    if has_quantity and has_margin:
+        return f"Productos con alta venta y bajo margen para {label}:"
+    if has_quantity:
+        return f"Productos mas vendidos para {label}:"
+    if has_margin:
+        return f"Productos ordenados por margen para {label}:"
+    if has_revenue:
+        return f"Productos con mayor valor vendido para {label}:"
+    return f"Productos para {label}:"
 
 
 def _profile_groups(profile) -> set[str]:

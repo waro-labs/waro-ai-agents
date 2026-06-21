@@ -7,10 +7,11 @@ import pytest
 from app.agent.classifier import classify_complexity, heuristic_complexity
 from app.agent.capabilities import ToolCapability, capability_from_spec, match_tools
 from app.agent.evidence import build_evidence_artifact, deterministic_evidence_summary
-from app.agent.intent import coerce_intent, heuristic_intent
+from app.agent.intent import coerce_intent, heuristic_intent, resolve_contextual_intent
 from app.agent.loop import AgentLoop
 from app.agent.plan import build_tool_plan
 from app.agent.profiles import profile_for_intent
+from app.agent.strategy import heuristic_answer_strategy
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
 from app.llm.base import LLMError, LLMMessage, LLMResponse
@@ -180,6 +181,37 @@ async def test_question_intent_customer_cohort_retention():
     assert intent.grain == "cohort_period"
     assert "retention_pct" in intent.measures
     assert "cohort" in intent.dimensions
+
+
+def test_contextual_intent_inherits_product_entity_and_period():
+    previous = heuristic_intent("dime los productos mas vendidos del ano")
+    intent = resolve_contextual_intent(
+        heuristic_intent("que margen tienen"),
+        question="que margen tienen",
+        conversation_state={
+            "source": "artifact",
+            "active_entity": previous.entity,
+            "active_grain": previous.grain,
+            "active_period": previous.time_range.to_dict(),
+            "active_measures": list(previous.measures),
+            "active_dimensions": list(previous.dimensions),
+        },
+    )
+    assert intent.entity == "product"
+    assert intent.grain == "product_period"
+    assert "margin" in intent.measures
+    assert intent.time_range.label == previous.time_range.label
+
+
+def test_answer_strategy_recommends_from_contextual_follow_up():
+    strategy = heuristic_answer_strategy(
+        question="que puedo hacer con esto",
+        intent=heuristic_intent("que puedo hacer con esto"),
+        artifact={"safe_to_answer": True},
+        conversation_state={"source": "artifact", "active_entity": "customer"},
+    )
+    assert strategy.type == "recommendation"
+    assert strategy.use_previous_artifact is True
 
 
 def _dynamic_capability(
@@ -386,6 +418,39 @@ def test_evidence_merges_product_sales_and_margin_rows():
     assert "50 unidades" in summary
     assert "$1.000.000 vendido" in summary
     assert "margen 12%" in summary
+
+
+def test_product_ranking_summary_does_not_add_margin_when_not_requested():
+    intent = heuristic_intent("dime los productos mas vendidos del ano")
+    plan = build_tool_plan(
+        intent,
+        match_tools(
+            intent,
+            [capability_from_spec(TOOL_SPECS["waro.financial.products"])],
+            scopes=("financial:read",),
+        ),
+    )
+    artifact = build_evidence_artifact(
+        question="dime los productos mas vendidos del ano",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.financial.products",
+                "status": "succeeded",
+                "result": {
+                    "products": [
+                        {"name": "Burger", "quantity": 50, "revenue": 1000000, "margin": 12}
+                    ]
+                },
+            }
+        ],
+    )
+    summary = deterministic_evidence_summary(artifact)
+    assert "Productos mas vendidos" in summary
+    assert "bajo margen" not in summary
+    assert "margen 12%" not in summary
+    assert "50 unidades" in summary
 
 
 def test_evidence_summarizes_waros_customer_rows():

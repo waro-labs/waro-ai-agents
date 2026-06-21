@@ -100,6 +100,23 @@ def match_tools(
     return matches
 
 
+def search_capabilities(
+    intent: QuestionIntent,
+    capabilities: list[ToolCapability],
+    *,
+    scopes: tuple[str, ...],
+    limit: int = 8,
+) -> list[CapabilityMatch]:
+    """Return compatible capability candidates for planning.
+
+    This keeps discovery dynamic: new CLI capabilities participate through their
+    declared contract instead of hardcoded module routing.
+    """
+    matches = match_tools(intent, capabilities, scopes=scopes)
+    accepted = [match for match in matches if match.accepted]
+    return (accepted or matches)[:limit]
+
+
 def _score_capability(
     intent: QuestionIntent,
     capability: ToolCapability,
