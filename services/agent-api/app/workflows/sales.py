@@ -21,6 +21,7 @@ from app.streaming import StreamEvent, stream_event, terminal_error_event
 from app.telemetry import current_trace_ids
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
 from app.tools.catalog import tool_catalog
+from app.tools.data_shaper import DataShaper, ShapeProfile
 from app.tools.planner import ToolPlan, ToolPlanner, ToolPlanStep
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import SalesQuestionRequest, SalesWorkflowResponse
@@ -42,6 +43,15 @@ SALES_SIGNAL_PATTERNS = (
     r"\bticket\b",
     r"\bultim[oa]s?\s+\d{1,3}\s+dias?\b",
     r"\b(hoy|ayer|este mes|del mes|mes actual|esta semana|semana actual)\b",
+)
+
+CUSTOMER_RANKING_PROFILE = ShapeProfile(
+    entity="customers",
+    allowed_rank_fields=frozenset(
+        {"order_count", "total_spent", "avg_ticket", "last_order_date"}
+    ),
+    default_rank_fields=("total_spent", "order_count"),
+    active_fields=("order_count", "total_spent"),
 )
 
 SPANISH_NUMBER_WORDS = {
@@ -125,6 +135,7 @@ class SalesWorkflow:
         )
         self.llm_adapter = llm_adapter or get_llm_adapter(settings)
         self.tool_planner = ToolPlanner()
+        self.data_shaper = DataShaper()
         self.tracer = trace.get_tracer(__name__)
         self.graph = self._build_graph()
 
@@ -1931,36 +1942,7 @@ class SalesWorkflow:
         return max(1, min(limit, 50))
 
     def _validated_operations(self, value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        allowed_types = {"filter", "rank", "sort", "limit", "compare", "group", "aggregate"}
-        allowed_directions = {"asc", "desc"}
-        operations: list[dict[str, Any]] = []
-        for item in value[:8]:
-            if not isinstance(item, dict) or item.get("type") not in allowed_types:
-                continue
-            operation: dict[str, Any] = {"type": str(item["type"])}
-            if isinstance(item.get("condition"), str):
-                operation["condition"] = item["condition"][:160]
-            if isinstance(item.get("by"), list):
-                operation["by"] = [
-                    str(field)
-                    for field in item["by"][:5]
-                    if isinstance(field, str) and field
-                ]
-            elif isinstance(item.get("by"), str):
-                operation["by"] = [str(item["by"])]
-            if item.get("direction") in allowed_directions:
-                operation["direction"] = str(item["direction"])
-            if item.get("field") and isinstance(item.get("field"), str):
-                operation["field"] = str(item["field"])
-            if "value" in item:
-                try:
-                    operation["value"] = max(1, min(int(item["value"]), 50))
-                except (TypeError, ValueError):
-                    pass
-            operations.append(operation)
-        return operations
+        return self.data_shaper.normalize_operations(value)
 
     def _default_analysis_operations(
         self,
@@ -2685,72 +2667,36 @@ class SalesWorkflow:
         semantic_plan: dict[str, Any] | None,
         limit: int,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        operations = (
-            semantic_plan.get("operations")
-            if isinstance(semantic_plan, dict) and isinstance(semantic_plan.get("operations"), list)
-            else []
+        result = self.data_shaper.shape_ranked_rows(
+            rows,
+            profile=CUSTOMER_RANKING_PROFILE,
+            operations=semantic_plan.get("operations") if isinstance(semantic_plan, dict) else None,
+            sort_field=str(semantic_plan.get("sort_field"))
+            if isinstance(semantic_plan, dict) and semantic_plan.get("sort_field")
+            else None,
+            limit=limit,
         )
-        sort_fields = self._customer_rank_fields(semantic_plan)
-        active_rows = [
-            row
-            for row in rows
-            if self._numeric_value(row.get("order_count")) not in {None, 0}
-            or self._numeric_value(row.get("total_spent")) not in {None, 0}
-        ]
-        ranked = sorted(
-            active_rows,
-            key=lambda row: tuple(
-                self._numeric_value(row.get(field)) or 0 for field in sort_fields
-            ),
-            reverse=True,
-        )
-        bounded_limit = max(1, min(limit, 50))
-        shaped = ranked[:bounded_limit]
-        return shaped, {
-            "input_rows": len(rows),
-            "output_rows": len(shaped),
-            "filtered_rows": len(rows) - len(active_rows),
-            "sort_fields": sort_fields,
-            "limit": bounded_limit,
-            "operations": operations
-            or self._default_analysis_operations(
-                request_kind="customer_ranking",
-                sort_field=sort_fields[0] if sort_fields else None,
-                limit=bounded_limit,
-            ),
-        }
+        return result.rows, result.execution
 
     def _customer_rank_fields(self, semantic_plan: dict[str, Any] | None) -> list[str]:
-        allowed = {"order_count", "total_spent", "avg_ticket", "last_order_date"}
-        operations = (
-            semantic_plan.get("operations")
-            if isinstance(semantic_plan, dict) and isinstance(semantic_plan.get("operations"), list)
-            else []
+        operations = self.data_shaper.normalize_operations(
+            semantic_plan.get("operations") if isinstance(semantic_plan, dict) else None
         )
-        for operation in operations:
-            if not isinstance(operation, dict) or operation.get("type") not in {"rank", "sort"}:
-                continue
-            fields = operation.get("by")
-            if isinstance(fields, list):
-                selected = [
-                    str(field)
-                    for field in fields
-                    if isinstance(field, str) and field in allowed
-                ]
-                if selected:
-                    return selected
         sort_field = (
-            semantic_plan.get("sort_field")
-            if isinstance(semantic_plan, dict) and semantic_plan.get("sort_field") in allowed
+            str(semantic_plan.get("sort_field"))
+            if (
+                isinstance(semantic_plan, dict)
+                and semantic_plan.get("sort_field") in CUSTOMER_RANKING_PROFILE.allowed_rank_fields
+            )
             else None
         )
-        if sort_field == "order_count":
-            return ["order_count", "total_spent"]
-        if sort_field == "avg_ticket":
-            return ["avg_ticket", "total_spent", "order_count"]
-        if sort_field == "last_order_date":
-            return ["last_order_date", "total_spent", "order_count"]
-        return ["total_spent", "order_count"]
+        return list(
+            self.data_shaper.rank_fields(
+                profile=CUSTOMER_RANKING_PROFILE,
+                operations=operations,
+                sort_field=sort_field,
+            )
+        )
 
     def _analysis_request_context(
         self,
