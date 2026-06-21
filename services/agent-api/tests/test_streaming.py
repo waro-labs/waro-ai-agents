@@ -29,6 +29,7 @@ def test_stream_event_names_define_initial_contract():
     assert STREAM_EVENT_NAMES == (
         "run_started",
         "step_started",
+        "agent_step",
         "tool_started",
         "tool_finished",
         "llm_started",

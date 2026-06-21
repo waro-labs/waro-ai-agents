@@ -134,7 +134,7 @@ class ToolPlanner:
                         "date-from": period["date_from"],
                         "date-to": period["date_to"],
                     },
-                    fields=["product_id", "product_name", "food_cost_pct", "margin_pct"],
+                    fields=["data", "meta", "success"],
                     reason="Food-cost context can explain margin and profitability questions.",
                 ),
             )

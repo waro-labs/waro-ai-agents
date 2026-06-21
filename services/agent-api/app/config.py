@@ -56,6 +56,24 @@ class Settings(BaseSettings):
     kimi_analysis_model: str | None = Field(default=None, alias="KIMI_ANALYSIS_MODEL")
     kimi_composer_model: str | None = Field(default=None, alias="KIMI_COMPOSER_MODEL")
     llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
+    agent_mode: Literal["legacy", "shadow", "react"] = Field(
+        default="legacy",
+        alias="AGENT_MODE",
+    )
+    tool_catalog_source: Literal["cli", "static"] = Field(
+        default="cli",
+        alias="TOOL_CATALOG_SOURCE",
+    )
+    tool_catalog_refresh_seconds: int = Field(
+        default=300,
+        alias="TOOL_CATALOG_REFRESH_SECONDS",
+    )
+    agent_max_steps_simple: int = Field(default=6, alias="AGENT_MAX_STEPS_SIMPLE")
+    agent_max_steps_complex: int = Field(default=10, alias="AGENT_MAX_STEPS_COMPLEX")
+    agent_conversation_message_limit: int = Field(
+        default=8,
+        alias="AGENT_CONVERSATION_MESSAGE_LIMIT",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

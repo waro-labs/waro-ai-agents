@@ -83,6 +83,16 @@ Configure these values in the `waro-ai-agents` runtime environment:
 | `KIMI_BASE_URL` | when Kimi enabled | `agent-api` | Defaults to Moonshot/OpenAI-compatible endpoint. |
 | `KIMI_MODEL` | when Kimi enabled | `agent-api` | Model used for workflow summaries. |
 | `LLM_TIMEOUT_SECONDS` | yes | `agent-api` | LLM request timeout. |
+| `AGENT_MODE` | yes | `agent-api` | `legacy`, `shadow`, or `react`. Default `legacy`. |
+| `TOOL_CATALOG_SOURCE` | yes | `agent-api` | `cli` (from `waro schema`) or `static` (embedded fallback). |
+| `TOOL_CATALOG_REFRESH_SECONDS` | optional | `agent-api` | Catalog cache TTL; default `300`. |
+| `AGENT_MAX_STEPS_SIMPLE` | optional | `agent-api` | ReAct step limit for simple queries; default `6`. |
+| `AGENT_MAX_STEPS_COMPLEX` | optional | `agent-api` | ReAct step limit for complex queries; default `10`. |
+| `AGENT_CONVERSATION_MESSAGE_LIMIT` | optional | `agent-api` | Messages loaded from `ai.messages`; default `8`. |
+| `KIMI_ROUTER_MODEL` | optional | `agent-api` | Complexity classifier / domain router; falls back to `KIMI_MODEL`. |
+| `KIMI_PLANNER_MODEL` | optional | `agent-api` | Agent loop steps (moderate); falls back to `KIMI_MODEL`. |
+| `KIMI_ANALYSIS_MODEL` | optional | `agent-api` | Loop + verify + compose for complex queries. |
+| `KIMI_COMPOSER_MODEL` | optional | `agent-api` | Final NLG for simple queries. |
 | `OTEL_ENABLED` | optional | `agent-api` | Set `false` in production if no collector is deployed. |
 | `AGENT_API_PORT` | optional | `agent-api` | Host localhost port used by `infra/docker-compose.server.yml`; defaults to `8100`. |
 | `WARO_RUNTIME_NETWORK` | optional | shared | External Docker network shared with `api_warocol.com`; defaults to `waro-network`. |

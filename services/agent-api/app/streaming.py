@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 StreamEventName = Literal[
     "run_started",
     "step_started",
+    "agent_step",
     "tool_started",
     "tool_finished",
     "llm_started",
@@ -23,6 +24,7 @@ StreamEventName = Literal[
 STREAM_EVENT_NAMES: tuple[StreamEventName, ...] = (
     "run_started",
     "step_started",
+    "agent_step",
     "tool_started",
     "tool_finished",
     "llm_started",

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.tools.allowlist import TOOL_SPECS, ToolSpec
+from app.tools.registry import get_tool_registry
 
 DISCOVERY_STOPWORDS = frozenset(
     {
@@ -53,6 +54,11 @@ def tool_catalog() -> list[dict[str, Any]]:
     return [tool_metadata(spec) for spec in TOOL_SPECS.values()]
 
 
+async def tool_catalog_async() -> list[dict[str, Any]]:
+    registry = get_tool_registry()
+    return await registry.catalog_metadata()
+
+
 @dataclass(frozen=True)
 class ToolDiscoveryMatch:
     spec: ToolSpec
@@ -83,6 +89,7 @@ def discover_tools(
     preferred_domain: str | None = None,
     scopes: tuple[str, ...] = (),
     limit: int = 5,
+    specs: dict[str, ToolSpec] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return auditable tool discovery results for the current request.
 
@@ -94,6 +101,7 @@ def discover_tools(
         question,
         preferred_domain=preferred_domain,
         scopes=scopes,
+        specs=specs,
     )
     available = [match.to_dict() for match in matches if match.available][:limit]
     rejected = [match.to_dict() for match in matches if not match.available][:limit]
@@ -106,11 +114,13 @@ def candidate_tools(
     preferred_domain: str | None = None,
     scopes: tuple[str, ...] = (),
     limit: int = 5,
+    specs: dict[str, ToolSpec] | None = None,
 ) -> list[ToolSpec]:
     matches = _rank_tools(
         question,
         preferred_domain=preferred_domain,
         scopes=scopes,
+        specs=specs,
     )
     return [match.spec for match in matches if match.available][:limit]
 
@@ -120,11 +130,13 @@ def _rank_tools(
     *,
     preferred_domain: str | None,
     scopes: tuple[str, ...],
+    specs: dict[str, ToolSpec] | None = None,
 ) -> list[ToolDiscoveryMatch]:
     normalized = normalize_query(question)
     scope_set = set(scopes)
     scored: list[tuple[int, str, ToolDiscoveryMatch]] = []
-    for spec in TOOL_SPECS.values():
+    catalog = specs or TOOL_SPECS
+    for spec in catalog.values():
         score, reasons = _score_tool(spec, normalized, preferred_domain=preferred_domain)
         if score <= 0:
             continue

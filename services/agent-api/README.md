@@ -33,18 +33,26 @@ the tool gateway executes a WARO tool. Keep API keys in your local `.env`; do
 not commit them.
 
 LLM summaries are disabled by default. To enable Kimi/Moonshot for workflow
-summaries, set these values in `services/agent-api/.env`:
+summaries, copy the env template and set values in `services/agent-api/.env`:
 
 ```bash
-LLM_PROVIDER=kimi
-KIMI_API_KEY=moonshot-or-kimi-key
-KIMI_BASE_URL=https://api.moonshot.ai/v1
-KIMI_MODEL=moonshot-v1-8k
-LLM_TIMEOUT_SECONDS=30
+cp services/agent-api/.env.example services/agent-api/.env
+# edit .env — at minimum LLM_PROVIDER, KIMI_API_KEY, and optionally AGENT_MODE
 ```
 
 Kimi summarizes validated workflow artifacts only. Tool execution still goes
 through the allowlisted `ToolGateway`.
+
+### Agent modes
+
+`AGENT_MODE` controls how Kali selects and executes tools:
+
+- `legacy` (default): deterministic planner + batch tool execution
+- `shadow`: legacy response, plus parallel agent artifact in `agent_shadow_artifact`
+- `react`: ReAct loop driven by CLI tool catalog capabilities
+
+Tool catalog loads from `waro schema` when `TOOL_CATALOG_SOURCE=cli`, with static
+`TOOL_SPECS` fallback. New CLI modules appear automatically when schema v2 includes them.
 
 LLM token usage and cost metadata are best-effort estimates. `agent-api` uses
 the token counts returned by Kimi when present, then applies a local pricing

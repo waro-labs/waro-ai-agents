@@ -10,7 +10,8 @@ from app.dependencies.internal_auth import InternalRequestContext, require_inter
 from app.streaming import streaming_response
 from app.telemetry import configure_tracing, instrument_app
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
-from app.tools.catalog import tool_catalog
+from app.tools.catalog import tool_catalog, tool_catalog_async
+from app.tools.registry import get_tool_registry, set_tool_registry
 from app.workflows.agent import AgentWorkflow
 from app.workflows.food_cost import FoodCostWorkflow
 from app.workflows.models import (
@@ -27,6 +28,9 @@ from app.workflows.sales import SalesWorkflow
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.settings = get_settings()
+    registry = get_tool_registry(app.state.settings)
+    set_tool_registry(registry)
+    await registry.refresh(force=True)
     configure_tracing(app.state.settings)
     yield
     await DatabasePool.close_pool()
@@ -101,7 +105,14 @@ async def call_tool(
 async def list_tool_catalog(
     _: InternalRequestContext = Depends(require_internal_request),
 ) -> dict[str, Any]:
-    return {"tools": tool_catalog()}
+    tools = await tool_catalog_async()
+    registry = get_tool_registry()
+    snapshot = await registry.refresh()
+    return {
+        "schema_version": snapshot.version,
+        "source": snapshot.source,
+        "tools": tools,
+    }
 
 
 @app.post(

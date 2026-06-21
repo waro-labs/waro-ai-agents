@@ -1,49 +1,12 @@
 import asyncio
 import json
 import os
-from dataclasses import dataclass
 from typing import Any
 
 from app.config import Settings
+from app.tools.response_contract import ResponseContract, contract_from_schema, contract_tool_name
+from app.tools.schema_v2 import parse_agent_catalog_payload
 from app.tools.sanitize import sanitize_text
-
-
-@dataclass(frozen=True)
-class ResponseContract:
-    command: tuple[str, str]
-    shape: str
-    row_path: str
-    fields: tuple[str, ...]
-    default_fields: tuple[str, ...]
-    top_level_keys: tuple[str, ...]
-
-
-def contract_tool_name(command: tuple[str, str]) -> str:
-    group, subcommand = command
-    return f"waro.{group}.{subcommand.replace('-', '_')}"
-
-
-def contract_from_schema(schema: dict[str, Any]) -> ResponseContract | None:
-    command_text = schema.get("command")
-    response = schema.get("response")
-    if not isinstance(command_text, str) or not isinstance(response, dict):
-        return None
-    parts = command_text.split()
-    if len(parts) != 2:
-        return None
-    fields = response.get("fields")
-    default_fields = response.get("default_fields")
-    top_level_keys = response.get("top_level_keys")
-    if not isinstance(fields, list) or not isinstance(default_fields, list):
-        return None
-    return ResponseContract(
-        command=(parts[0], parts[1]),
-        shape=str(response.get("shape") or ""),
-        row_path=str(response.get("row_path") or ""),
-        fields=tuple(str(field) for field in fields),
-        default_fields=tuple(str(field) for field in default_fields),
-        top_level_keys=tuple(str(field) for field in top_level_keys or []),
-    )
 
 
 class WaroContractRegistry:
@@ -90,9 +53,15 @@ class WaroContractRegistry:
             parsed = json.loads(stdout.strip() or "[]")
         except json.JSONDecodeError:
             return {}
+        version, agent_schemas = parse_agent_catalog_payload(parsed)
+        contracts: dict[str, ResponseContract] = {}
+        for agent_schema in agent_schemas:
+            if agent_schema.response is not None:
+                contracts[agent_schema.name] = agent_schema.response
+        if contracts:
+            return contracts
         if not isinstance(parsed, list):
             return {}
-        contracts: dict[str, ResponseContract] = {}
         for item in parsed:
             if not isinstance(item, dict):
                 continue

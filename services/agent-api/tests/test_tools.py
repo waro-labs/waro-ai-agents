@@ -410,7 +410,7 @@ def test_runner_builds_argv_without_shell_strings():
     argv = runner.build_argv(
         spec=spec,
         args=args,
-        fields=("product_id", "product_name"),
+        fields=("id", "name"),
         dry_run=True,
     )
 
@@ -420,7 +420,7 @@ def test_runner_builds_argv_without_shell_strings():
         "agent-json",
         "--no-color",
         "--fields",
-        "product_id,product_name",
+        "id,name",
         "analytics",
     )
     assert argv[7:] == ("food-cost", "--date-from", "2026-06-01", "--dry-run")

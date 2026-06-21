@@ -9,7 +9,8 @@ from app.config import Settings
 from app.database import get_db_connection
 from app.dependencies.internal_auth import InternalRequestContext
 from app.telemetry import current_trace_ids, mark_span_error
-from app.tools.allowlist import coerce_args, get_tool_spec, resolve_fields
+from app.tools.allowlist import resolve_fields
+from app.tools.registry import coerce_args_async, get_tool_registry
 from app.tools.audit import ToolCallAudit, summarize_result
 from app.tools.contracts import WaroContractRegistry
 from app.tools.models import ToolCallRequest, ToolCallResponse
@@ -28,6 +29,7 @@ class ToolGateway:
         self.settings = settings
         self.runner = runner or WaroCliRunner(settings)
         self.contracts = WaroContractRegistry(settings)
+        self.registry = get_tool_registry(settings)
         self.connection_factory = connection_factory
         self.tracer = trace.get_tracer(__name__)
 
@@ -37,7 +39,7 @@ class ToolGateway:
         request: ToolCallRequest,
         context: InternalRequestContext,
     ) -> ToolCallResponse:
-        spec = get_tool_spec(request.tool_name)
+        spec = await self.registry.get_spec(request.tool_name)
         if spec is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -51,7 +53,7 @@ class ToolGateway:
             )
 
         try:
-            args = coerce_args(spec, request.arguments)
+            args = await coerce_args_async(spec, request.arguments)
             contract = await self.contracts.get(spec.name)
             fields = resolve_fields(spec, request.fields, contract=contract)
         except (ValidationError, ValueError) as exc:

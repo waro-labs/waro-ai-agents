@@ -10,12 +10,14 @@ from opentelemetry.trace import Status, StatusCode
 from app.config import Settings
 from app.database import get_db_connection
 from app.dependencies.internal_auth import InternalRequestContext
+from app.agent.runner import KaliAgentRunner
 from app.evals.food_cost import evaluate_food_cost_artifact
 from app.llm import LLMAdapter, get_llm_adapter
 from app.llm.prompts import food_cost_summary_messages
 from app.streaming import StreamEvent, stream_event, terminal_error_event
 from app.telemetry import current_trace_ids
 from app.tools import ToolCallRequest, ToolCallResponse, ToolGateway
+from app.tools.registry import get_tool_registry
 from app.tools.sanitize import sanitize_value, truncate_text
 from app.workflows.models import FoodCostQuestionRequest, FoodCostWorkflowResponse
 
@@ -52,6 +54,14 @@ class FoodCostWorkflow:
             connection_factory=connection_factory,
         )
         self.llm_adapter = llm_adapter or get_llm_adapter(settings)
+        self.registry = get_tool_registry(settings)
+        self.kali_runner = KaliAgentRunner(
+            settings=settings,
+            gateway=self.gateway,
+            registry=self.registry,
+            llm_adapter=self.llm_adapter,
+            connection_factory=connection_factory,
+        )
         self.tracer = trace.get_tracer(__name__)
         self.graph = self._build_graph()
 
@@ -202,6 +212,42 @@ class FoodCostWorkflow:
             )
 
     def _build_graph(self):
+        if self.settings.agent_mode == "react":
+            return self._build_react_graph()
+        return self._build_legacy_graph()
+
+    def _build_react_graph(self):
+        graph = StateGraph(FoodCostGraphState)
+        graph.add_node("run_kali_agent", self._run_kali_agent_node)
+        graph.add_node("finish_run", self._finish_run_node)
+        graph.add_edge(START, "run_kali_agent")
+        graph.add_edge("run_kali_agent", "finish_run")
+        graph.add_edge("finish_run", END)
+        return graph.compile()
+
+    async def _run_kali_agent_node(self, state: FoodCostGraphState) -> FoodCostGraphState:
+        agent_artifact = await self.kali_runner.execute(
+            question=state["request"].question,
+            context=state["context"],
+            run_id=state["run_id"],
+            conversation_id=state.get("conversation_id"),
+        )
+        return {
+            "artifact": agent_artifact,
+            "summary": str(agent_artifact.get("summary") or ""),
+            "evals": evaluate_food_cost_artifact(agent_artifact),
+            "tool_calls": [
+                {
+                    "tool_name": obs.get("tool_name"),
+                    "status": obs.get("status"),
+                    "result_summary": obs.get("result_summary"),
+                }
+                for obs in agent_artifact.get("observations", [])
+                if isinstance(obs, dict)
+            ],
+        }
+
+    def _build_legacy_graph(self):
         graph = StateGraph(FoodCostGraphState)
         graph.add_node("route_food_cost", self._route_food_cost)
         graph.add_node("call_food_cost_tools", self._call_food_cost_tools_node)
@@ -565,7 +611,7 @@ class FoodCostWorkflow:
             (
                 "waro.analytics.food_cost",
                 period_args,
-                ["product_id", "product_name", "food_cost_pct", "margin_pct", "revenue", "cost"],
+                ["data", "meta", "success"],
             ),
             (
                 "waro.menu.products",
@@ -601,7 +647,7 @@ class FoodCostWorkflow:
             [self._product_snapshot(row) for row in food_cost_rows],
             key=lambda row: (
                 row.get("margin_pct") if row.get("margin_pct") is not None else 999999,
-                -(row.get("food_cost_pct") or 0),
+                -(row.get("food_cost_pct") or row.get("estimated_cost") or 0),
             ),
         )[:5]
         if not low_margin_products:
@@ -676,15 +722,18 @@ class FoodCostWorkflow:
         return []
 
     def _product_snapshot(self, row: dict[str, Any]) -> dict[str, Any]:
+        margin_pct = row.get("margin_pct")
+        if margin_pct is None:
+            margin_pct = row.get("profit_margin_pct") or row.get("profit_margin_real_pct")
         return sanitize_value(
             {
                 "id": row.get("product_id") or row.get("id"),
                 "name": row.get("product_name") or row.get("name"),
                 "food_cost_pct": row.get("food_cost_pct"),
-                "margin_pct": row.get("margin_pct"),
+                "margin_pct": margin_pct,
                 "margin": row.get("margin"),
-                "revenue": row.get("revenue"),
-                "cost": row.get("cost"),
+                "revenue": row.get("revenue") or row.get("total_revenue"),
+                "cost": row.get("cost") or row.get("estimated_cost"),
             }
         )
 

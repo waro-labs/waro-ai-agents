@@ -94,38 +94,10 @@ def sales_planner_messages(
                 }
                 for tool in tool_catalog
             ],
-            "allowed_intents": ["small_talk", "sales_metrics"],
-            "allowed_answer_styles": [
-                "direct_metric",
-                "business_analysis",
-                "financial_analysis",
-                "diagnostic",
-            ],
-            "allowed_request_kinds": [
-                "direct_metric",
-                "business_analysis",
-                "financial_analysis",
-                "product_ranking",
-                "customer_ranking",
-                "daily_analysis",
-                "diagnostic",
-            ],
-            "allowed_areas": ["commercial", "finance", "menu", "customers"],
-            "allowed_dimensions": ["overall", "date", "product", "customer", "category", "hour"],
-            "allowed_sort_fields": {
-                "product": ["quantity", "revenue", "margin", "cost"],
-                "customer": ["order_count", "total_spent", "avg_ticket", "last_order_date"],
-            },
-            "allowed_operations": [
-                "filter",
-                "rank",
-                "sort",
-                "limit",
-                "compare",
-                "group",
-                "aggregate",
-            ],
-            "allowed_group_by": [None, "date", "weekday", "hour", "product", "payment", "ticket"],
+            "planning_notes": (
+                "Infer intent, period and tool calls from capabilities. "
+                "New CLI tools may appear without code changes."
+            ),
         }
     )
     return [
@@ -134,46 +106,13 @@ def sales_planner_messages(
             content=(
                 "Eres el planner semantico de Kali para ventas WARO. "
                 "No redactes respuesta al usuario. Devuelve SOLO JSON valido, sin markdown. "
-                "Tu trabajo es resolver intencion, periodo, estilo de respuesta y llamadas a tools. "
-                "Usa la fecha actual y zona horaria entregadas. Reglas criticas: "
-                "'mes pasado' es el mes calendario anterior completo; 'este mes', 'del mes', "
-                "'mes actual', 'presente mes' o typos cercanos como 'presnete mes' "
-                "son desde el dia 1 del mes actual hasta today; 'ayer' es today menos un dia. "
-                "Si el usuario pide promedio por dia, tendencia diaria, dia a dia o ultimos N dias, "
-                "usa group_by='date'. Para preguntas concretas como 'ventas de ayer', "
-                "answer_style debe ser direct_metric. Para analisis financiero, usa financial_analysis. "
-                "Elige tools y operaciones leyendo available_tools.capabilities: entity, grain, "
-                "measures, dimensions, supported_operations, default_rank, active_condition y "
-                "supports_period. No dependas solo del nombre de la tool; si aparece una tool nueva "
-                "con capabilities relevantes, puedes seleccionarla. "
-                "Si pide productos mas vendidos, productos por cantidad o ranking de productos, "
-                "request_kind='product_ranking', dimensions incluye 'product', sort_field='quantity' "
-                "y tools debe incluir waro.financial.products. Si pide clientes frecuentes, mejores "
-                "clientes o ranking de clientes, request_kind='customer_ranking', dimensions incluye "
-                "'customer'. Usa sort_field='order_count' solo para frecuencia, ordenes o clientes "
-                "frecuentes; usa sort_field='total_spent' para mejores clientes, mayor valor o "
-                "clientes que mas compraron en dinero; tools debe incluir "
-                "waro.customers.metrics y waro.customers.list. Si el usuario pide N elementos, "
-                "devuelve limit=N. Para preguntas de ranking o comparacion, agrega operations: "
-                "una lista breve de pasos analiticos como filter, rank, sort, limit, compare, "
-                "group o aggregate. Ejemplo clientes activos: "
-                "[{\"type\":\"filter\",\"condition\":\"order_count > 0 OR total_spent > 0\"},"
-                "{\"type\":\"rank\",\"by\":[\"order_count\",\"total_spent\"],\"direction\":\"desc\"},"
-                "{\"type\":\"limit\",\"value\":20}]. Tolera errores de escritura del usuario. "
-                "Formato exacto: {\"intent\":\"small_talk|sales_metrics\","
-                "\"date_from\":\"YYYY-MM-DD|null\",\"date_to\":\"YYYY-MM-DD|null\","
-                "\"group_by\":\"date|weekday|hour|product|payment|ticket|null\","
+                "Resuelve intencion, periodo y tools leyendo available_tools.capabilities "
+                "(entity, measures, dimensions, supported_operations, supports_period). "
+                "No dependas de nombres fijos de tools. Tolera errores de escritura del usuario. "
+                "Formato: {\"intent\":\"small_talk|sales_metrics\",\"date_from\":\"YYYY-MM-DD|null\","
+                "\"date_to\":\"YYYY-MM-DD|null\",\"group_by\":null,"
                 "\"answer_style\":\"direct_metric|business_analysis|financial_analysis|diagnostic\","
-                "\"request_kind\":\"direct_metric|business_analysis|financial_analysis|product_ranking|customer_ranking|daily_analysis|diagnostic\","
-                "\"area\":\"commercial|finance|menu|customers\","
-                "\"objective\":\"...\","
-                "\"dimensions\":[\"overall|date|product|customer|category|hour\"],"
-                "\"requested_metrics\":[\"sales|average_ticket|quantity_sold|revenue|gross_profit|frequency|customer_activity\"],"
-                "\"limit\":20,"
-                "\"sort_field\":\"quantity|revenue|margin|cost|order_count|total_spent|avg_ticket|last_order_date|null\","
-                "\"operations\":[{\"type\":\"filter|rank|sort|limit|compare|group|aggregate\","
-                "\"condition\":\"...\",\"by\":[\"...\"],\"direction\":\"asc|desc\",\"value\":20}],"
-                "\"tools\":[{\"name\":\"waro.sales.metrics\",\"reason\":\"...\"}],"
+                "\"request_kind\":\"...\",\"tools\":[{\"name\":\"waro....\",\"reason\":\"...\"}],"
                 "\"confidence\":0.0,\"reason\":\"...\"}."
             ),
         ),

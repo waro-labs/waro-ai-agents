@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.tools.contracts import ResponseContract
+from app.tools.response_contract import ResponseContract
 
 
 class ToolArgs(BaseModel):
@@ -177,9 +177,29 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         command=("analytics", "food-cost"),
         scope="analytics:read",
         args_model=FoodCostArgs,
-        default_fields=("product_id", "product_name", "food_cost_pct", "margin_pct"),
+        default_fields=("data", "meta", "success"),
         allowed_fields=frozenset(
-            {"product_id", "product_name", "food_cost_pct", "margin_pct", "revenue", "cost"}
+            {
+                "data",
+                "meta",
+                "success",
+                "avg_price",
+                "category",
+                "classification",
+                "cost_used_for_classification",
+                "costo_percibido",
+                "estimated_cost",
+                "id",
+                "name",
+                "order_count",
+                "price",
+                "profit_margin_pct",
+                "profit_margin_real_pct",
+                "profit_per_unit",
+                "total_profit",
+                "total_revenue",
+                "total_units_sold",
+            }
         ),
         domain="food_cost",
         description="Analyze product food cost, margin, revenue, and cost by period.",
@@ -188,11 +208,17 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         capabilities={
             "entity": "product",
             "grain": "product_period",
-            "measures": ["food_cost_pct", "margin_pct", "revenue", "cost"],
-            "dimensions": ["product_id", "product_name"],
+            "measures": [
+                "profit_margin_pct",
+                "profit_margin_real_pct",
+                "total_revenue",
+                "estimated_cost",
+                "total_profit",
+            ],
+            "dimensions": ["id", "name", "category"],
             "supported_operations": ["filter", "rank", "sort", "limit"],
-            "default_rank": ["food_cost_pct"],
-            "active_condition": ["revenue", "cost"],
+            "default_rank": ["profit_margin_pct"],
+            "active_condition": ["total_revenue", "estimated_cost"],
             "supports_period": True,
         },
     ),
