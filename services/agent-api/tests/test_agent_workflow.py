@@ -144,6 +144,14 @@ def test_agent_workflow_routes_by_explicit_workflow_and_keywords():
     assert food_cost.workflow == "food_cost"
     assert food_cost.reason == "food_cost_keyword"
 
+    sales_margin = workflow._route(
+        AgentQuestionRequest(
+            question="dime qué productos venden mucho pero tienen bajo margen"
+        )
+    )
+    assert sales_margin.workflow == "sales"
+    assert sales_margin.reason == "sales_margin_keyword"
+
 
 @pytest.mark.asyncio
 async def test_agent_workflow_uses_router_model_for_hybrid_prerouting():

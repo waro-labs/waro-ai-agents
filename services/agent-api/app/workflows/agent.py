@@ -338,6 +338,12 @@ class AgentWorkflow:
             )
 
         normalized = self._normalize(request.question)
+        if self._is_sales_margin_question(normalized):
+            return AgentRoute(
+                workflow="sales",
+                confidence=0.9,
+                reason="sales_margin_keyword",
+            )
         if self._matches(normalized, FOOD_COST_HINTS):
             return AgentRoute(
                 workflow="food_cost",
@@ -364,6 +370,31 @@ class AgentWorkflow:
     def _matches(self, normalized: str, hints: tuple[str, ...]) -> bool:
         return any(re.search(pattern, normalized) for pattern in hints)
 
+    def _is_sales_margin_question(self, normalized: str) -> bool:
+        has_margin_signal = bool(
+            re.search(
+                r"\b(margen(?:es)?|rentabilidad|rentables?|bajo margen)\b",
+                normalized,
+            )
+        )
+        has_sales_product_signal = bool(
+            re.search(
+                r"\b(productos?|platos?|items?)\b",
+                normalized,
+            )
+            and re.search(
+                r"\b(venden|vendidos?|vendid[oa]s?|ventas?|ingresos?|cantidad|unidades)\b",
+                normalized,
+            )
+        )
+        has_recipe_signal = bool(
+            re.search(
+                r"\b(food\s*cost|costo\s+de\s+comida|recetas?|insumos?|ingredientes?|preparacion)\b",
+                normalized,
+            )
+        )
+        return has_margin_signal and has_sales_product_signal and not has_recipe_signal
+
 
 WorkflowName = Literal["sales", "food_cost"]
 
@@ -380,6 +411,8 @@ FOOD_COST_HINTS = (
 SALES_HINTS = (
     r"\bventas?\b",
     r"\bvend[ií]\b",
+    r"\bvenden\b",
+    r"\bvendid[oa]s?\b",
     r"\bvendimos\b",
     r"\bingresos?\b",
     r"\bfactur",
