@@ -1562,6 +1562,12 @@ class SalesWorkflow:
             tool_calls,
             product_limit=requested_limit,
             customer_limit=requested_limit,
+            semantic_plan=semantic_plan,
+        )
+        analysis_execution = (
+            auxiliary_context.pop("analysis_execution")
+            if isinstance(auxiliary_context.get("analysis_execution"), dict)
+            else {}
         )
         analysis_request = self._analysis_request_context(
             request=request,
@@ -1591,6 +1597,7 @@ class SalesWorkflow:
             "metrics": metrics,
             "analysis_request": analysis_request,
             "response_contract": response_contract,
+            "analysis_execution": analysis_execution,
             "auxiliary_context": auxiliary_context,
             "financial_analysis": financial_analysis
             if answer_style == "financial_analysis"
@@ -1635,6 +1642,7 @@ class SalesWorkflow:
             "tool_plan": artifact.get("tool_plan"),
             "semantic_plan": artifact.get("semantic_plan"),
             "response_contract": artifact.get("response_contract"),
+            "analysis_execution": artifact.get("analysis_execution"),
         }
 
     def _stream_error_type(self, error: Any) -> str | None:
@@ -1717,6 +1725,11 @@ class SalesWorkflow:
             "limit": self._requested_limit_from_question(normalized, default=20),
             "sort_field": sort_field,
             "tools": [{"name": "waro.sales.metrics", "reason": "fallback_default"}],
+            "operations": self._default_analysis_operations(
+                request_kind=request_kind,
+                sort_field=sort_field,
+                limit=self._requested_limit_from_question(normalized, default=20),
+            ),
             "confidence": 0.55,
             "reason": "deterministic_fallback",
             "source": "deterministic_fallback",
@@ -1874,6 +1887,13 @@ class SalesWorkflow:
             request_kind=request_kind,
             sort_field=sort_field,
         )
+        operations = self._validated_operations(plan.get("operations"))
+        if not operations:
+            operations = self._default_analysis_operations(
+                request_kind=request_kind,
+                sort_field=sort_field,
+                limit=limit,
+            )
         return {
             "intent": intent,
             "period": period,
@@ -1886,6 +1906,7 @@ class SalesWorkflow:
             "requested_metrics": requested_metrics,
             "limit": limit,
             "sort_field": sort_field,
+            "operations": operations,
             "tools": sanitize_value(tools),
             "confidence": confidence,
             "reason": str(plan.get("reason") or fallback["reason"])[:300],
@@ -1908,6 +1929,71 @@ class SalesWorkflow:
         except (TypeError, ValueError):
             return fallback
         return max(1, min(limit, 50))
+
+    def _validated_operations(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        allowed_types = {"filter", "rank", "sort", "limit", "compare", "group", "aggregate"}
+        allowed_directions = {"asc", "desc"}
+        operations: list[dict[str, Any]] = []
+        for item in value[:8]:
+            if not isinstance(item, dict) or item.get("type") not in allowed_types:
+                continue
+            operation: dict[str, Any] = {"type": str(item["type"])}
+            if isinstance(item.get("condition"), str):
+                operation["condition"] = item["condition"][:160]
+            if isinstance(item.get("by"), list):
+                operation["by"] = [
+                    str(field)
+                    for field in item["by"][:5]
+                    if isinstance(field, str) and field
+                ]
+            elif isinstance(item.get("by"), str):
+                operation["by"] = [str(item["by"])]
+            if item.get("direction") in allowed_directions:
+                operation["direction"] = str(item["direction"])
+            if item.get("field") and isinstance(item.get("field"), str):
+                operation["field"] = str(item["field"])
+            if "value" in item:
+                try:
+                    operation["value"] = max(1, min(int(item["value"]), 50))
+                except (TypeError, ValueError):
+                    pass
+            operations.append(operation)
+        return operations
+
+    def _default_analysis_operations(
+        self,
+        *,
+        request_kind: str | None,
+        sort_field: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if request_kind == "customer_ranking":
+            by = [sort_field] if sort_field else ["total_spent"]
+            if "order_count" not in by:
+                by.append("order_count")
+            if "total_spent" not in by:
+                by.append("total_spent")
+            return [
+                {
+                    "type": "filter",
+                    "condition": "order_count > 0 OR total_spent > 0",
+                },
+                {"type": "rank", "by": by, "direction": "desc"},
+                {"type": "limit", "value": max(1, min(limit, 50))},
+            ]
+        if request_kind == "product_ranking":
+            by = [sort_field] if sort_field else ["quantity"]
+            return [
+                {
+                    "type": "filter",
+                    "condition": "quantity > 0 OR revenue > 0 OR profit > 0",
+                },
+                {"type": "rank", "by": by, "direction": "desc"},
+                {"type": "limit", "value": max(1, min(limit, 50))},
+            ]
+        return []
 
     def _guardrail_request_kind(
         self,
@@ -1994,6 +2080,8 @@ class SalesWorkflow:
         if request_kind == "customer_ranking":
             if re.search(r"\b(frecuencia|frecuentes?|compran|compras|ordenes?)\b", normalized):
                 return "order_count"
+            if re.search(r"\b(mejores?|valor|gasto|comprado|compraron|dinero|ingresos?)\b", normalized):
+                return "total_spent"
             return sort_field if sort_field in {"order_count", "total_spent", "avg_ticket", "last_order_date"} else "total_spent"
         if request_kind == "product_ranking":
             if re.search(r"\b(margen|rentabilidad|rentables?|peor(?:es)?)\b", normalized):
@@ -2509,6 +2597,7 @@ class SalesWorkflow:
         *,
         product_limit: int = 10,
         customer_limit: int = 10,
+        semantic_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         financial_rows = self._rows_for(tool_calls, "waro.financial.products")
         financial_result = self._result_for(tool_calls, "waro.financial.products")
@@ -2561,7 +2650,7 @@ class SalesWorkflow:
                     row for row in customer_metrics["top_customers"] if isinstance(row, dict)
                 ]
         if customer_rows:
-            context["customers"] = [
+            normalized_customers = [
                 {
                     "id": row.get("id") or row.get("customer_id"),
                     "name": row.get("name") or row.get("customer_name"),
@@ -2576,9 +2665,92 @@ class SalesWorkflow:
                     "avg_ticket": row.get("avg_ticket"),
                     "last_order_date": row.get("last_order_date"),
                 }
-                for row in customer_rows[:customer_limit]
+                for row in customer_rows
             ]
+            shaped_customers, execution = self._shape_customer_rows(
+                normalized_customers,
+                semantic_plan=semantic_plan,
+                limit=customer_limit,
+            )
+            context["customers"] = shaped_customers
+            context["analysis_execution"] = {
+                "customers": execution,
+            }
         return sanitize_value(context)
+
+    def _shape_customer_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        semantic_plan: dict[str, Any] | None,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        operations = (
+            semantic_plan.get("operations")
+            if isinstance(semantic_plan, dict) and isinstance(semantic_plan.get("operations"), list)
+            else []
+        )
+        sort_fields = self._customer_rank_fields(semantic_plan)
+        active_rows = [
+            row
+            for row in rows
+            if self._numeric_value(row.get("order_count")) not in {None, 0}
+            or self._numeric_value(row.get("total_spent")) not in {None, 0}
+        ]
+        ranked = sorted(
+            active_rows,
+            key=lambda row: tuple(
+                self._numeric_value(row.get(field)) or 0 for field in sort_fields
+            ),
+            reverse=True,
+        )
+        bounded_limit = max(1, min(limit, 50))
+        shaped = ranked[:bounded_limit]
+        return shaped, {
+            "input_rows": len(rows),
+            "output_rows": len(shaped),
+            "filtered_rows": len(rows) - len(active_rows),
+            "sort_fields": sort_fields,
+            "limit": bounded_limit,
+            "operations": operations
+            or self._default_analysis_operations(
+                request_kind="customer_ranking",
+                sort_field=sort_fields[0] if sort_fields else None,
+                limit=bounded_limit,
+            ),
+        }
+
+    def _customer_rank_fields(self, semantic_plan: dict[str, Any] | None) -> list[str]:
+        allowed = {"order_count", "total_spent", "avg_ticket", "last_order_date"}
+        operations = (
+            semantic_plan.get("operations")
+            if isinstance(semantic_plan, dict) and isinstance(semantic_plan.get("operations"), list)
+            else []
+        )
+        for operation in operations:
+            if not isinstance(operation, dict) or operation.get("type") not in {"rank", "sort"}:
+                continue
+            fields = operation.get("by")
+            if isinstance(fields, list):
+                selected = [
+                    str(field)
+                    for field in fields
+                    if isinstance(field, str) and field in allowed
+                ]
+                if selected:
+                    return selected
+        sort_field = (
+            semantic_plan.get("sort_field")
+            if isinstance(semantic_plan, dict) and semantic_plan.get("sort_field") in allowed
+            else None
+        )
+        if sort_field == "order_count":
+            return ["order_count", "total_spent"]
+        if sort_field == "avg_ticket":
+            return ["avg_ticket", "total_spent", "order_count"]
+        if sort_field == "last_order_date":
+            return ["last_order_date", "total_spent", "order_count"]
+        return ["total_spent", "order_count"]
 
     def _analysis_request_context(
         self,
@@ -2598,6 +2770,11 @@ class SalesWorkflow:
         semantic_request_kind = (semantic_plan or {}).get("request_kind")
         semantic_limit = self._semantic_limit_from_plan(semantic_plan, default=20)
         semantic_sort_field = (semantic_plan or {}).get("sort_field")
+        semantic_operations = (
+            semantic_plan.get("operations")
+            if isinstance(semantic_plan, dict) and isinstance(semantic_plan.get("operations"), list)
+            else []
+        )
         area = (
             str(semantic_area)
             if semantic_area in {"commercial", "finance", "menu", "customers"}
@@ -2643,6 +2820,7 @@ class SalesWorkflow:
                 "requested_metrics": requested_metrics,
                 "limit": semantic_limit,
                 "sort_field": semantic_sort_field,
+                "operations": semantic_operations,
                 "data_available": data_available,
                 "depth": self._analysis_depth(normalized),
                 "missing_data_policy": "state_limitations",
@@ -3252,14 +3430,24 @@ class SalesWorkflow:
             else {}
         )
         limit = self._summary_limit(analysis_request, default=10)
+        sort_fields = self._customer_rank_fields(analysis_request)
         ranked = sorted(
             [customer for customer in customers if isinstance(customer, dict)],
-            key=lambda customer: self._numeric_value(customer.get("order_count"))
-            or self._numeric_value(customer.get("total_spent"))
-            or 0,
+            key=lambda customer: tuple(
+                self._numeric_value(customer.get(field)) or 0 for field in sort_fields
+            ),
             reverse=True,
         )[:limit]
-        lines = [f"Clientes con mayor frecuencia para {label}:"]
+        sort_field = analysis_request.get("sort_field")
+        if sort_field == "order_count":
+            title = "Clientes con mayor frecuencia"
+        elif sort_field == "avg_ticket":
+            title = "Clientes con mayor ticket promedio"
+        elif sort_field == "last_order_date":
+            title = "Clientes con compra mas reciente"
+        else:
+            title = "Clientes con mayor valor comprado"
+        lines = [f"{title} para {label}:"]
         for index, customer in enumerate(ranked, start=1):
             name = str(customer.get("name") or customer.get("phone") or "Cliente sin nombre")
             details = []

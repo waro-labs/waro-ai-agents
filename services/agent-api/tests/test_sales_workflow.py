@@ -355,6 +355,48 @@ def test_sales_workflow_customer_fallback_does_not_return_generic_sales_summary(
     assert "vendiste" not in summary
 
 
+def test_sales_workflow_shapes_customer_rows_before_limiting():
+    workflow = SalesWorkflow(settings=Settings())
+
+    context = workflow._auxiliary_context(
+        [
+            {
+                "tool_name": "waro.customers.list",
+                "status": "succeeded",
+                "result": {
+                    "rows": [
+                        {"name": "Sin actividad", "order_count": 0, "total_spent": 0},
+                        {"name": "Compra alta", "order_count": 1, "total_spent": 200000},
+                        {"name": "Frecuente", "order_count": 3, "total_spent": 120000},
+                    ]
+                },
+            }
+        ],
+        customer_limit=2,
+        semantic_plan={
+            "request_kind": "customer_ranking",
+            "sort_field": "order_count",
+            "operations": [
+                {
+                    "type": "filter",
+                    "condition": "order_count > 0 OR total_spent > 0",
+                },
+                {"type": "rank", "by": ["order_count", "total_spent"], "direction": "desc"},
+                {"type": "limit", "value": 2},
+            ],
+        },
+    )
+
+    customers = context["customers"]
+    assert [customer["name"] for customer in customers] == ["Frecuente", "Compra alta"]
+    assert "Sin actividad" not in {customer["name"] for customer in customers}
+    assert context["analysis_execution"]["customers"]["filtered_rows"] == 1
+    assert context["analysis_execution"]["customers"]["sort_fields"] == [
+        "order_count",
+        "total_spent",
+    ]
+
+
 def test_sales_workflow_product_fallback_reports_product_failure():
     workflow = SalesWorkflow(settings=Settings())
 

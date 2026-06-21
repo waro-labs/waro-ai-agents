@@ -76,6 +76,15 @@ def sales_planner_messages(
                 "product": ["quantity", "revenue", "margin", "cost"],
                 "customer": ["order_count", "total_spent", "avg_ticket", "last_order_date"],
             },
+            "allowed_operations": [
+                "filter",
+                "rank",
+                "sort",
+                "limit",
+                "compare",
+                "group",
+                "aggregate",
+            ],
             "allowed_group_by": [None, "date", "weekday", "hour", "product", "payment", "ticket"],
         }
     )
@@ -97,9 +106,16 @@ def sales_planner_messages(
                 "request_kind='product_ranking', dimensions incluye 'product', sort_field='quantity' "
                 "y tools debe incluir waro.financial.products. Si pide clientes frecuentes, mejores "
                 "clientes o ranking de clientes, request_kind='customer_ranking', dimensions incluye "
-                "'customer', sort_field='order_count' para frecuencia y tools debe incluir "
+                "'customer'. Usa sort_field='order_count' solo para frecuencia, ordenes o clientes "
+                "frecuentes; usa sort_field='total_spent' para mejores clientes, mayor valor o "
+                "clientes que mas compraron en dinero; tools debe incluir "
                 "waro.customers.metrics y waro.customers.list. Si el usuario pide N elementos, "
-                "devuelve limit=N. Tolera errores de escritura del usuario. "
+                "devuelve limit=N. Para preguntas de ranking o comparacion, agrega operations: "
+                "una lista breve de pasos analiticos como filter, rank, sort, limit, compare, "
+                "group o aggregate. Ejemplo clientes activos: "
+                "[{\"type\":\"filter\",\"condition\":\"order_count > 0 OR total_spent > 0\"},"
+                "{\"type\":\"rank\",\"by\":[\"order_count\",\"total_spent\"],\"direction\":\"desc\"},"
+                "{\"type\":\"limit\",\"value\":20}]. Tolera errores de escritura del usuario. "
                 "Formato exacto: {\"intent\":\"small_talk|sales_metrics\","
                 "\"date_from\":\"YYYY-MM-DD|null\",\"date_to\":\"YYYY-MM-DD|null\","
                 "\"group_by\":\"date|weekday|hour|product|payment|ticket|null\","
@@ -111,6 +127,8 @@ def sales_planner_messages(
                 "\"requested_metrics\":[\"sales|average_ticket|quantity_sold|revenue|gross_profit|frequency|customer_activity\"],"
                 "\"limit\":20,"
                 "\"sort_field\":\"quantity|revenue|margin|cost|order_count|total_spent|avg_ticket|last_order_date|null\","
+                "\"operations\":[{\"type\":\"filter|rank|sort|limit|compare|group|aggregate\","
+                "\"condition\":\"...\",\"by\":[\"...\"],\"direction\":\"asc|desc\",\"value\":20}],"
                 "\"tools\":[{\"name\":\"waro.sales.metrics\",\"reason\":\"...\"}],"
                 "\"confidence\":0.0,\"reason\":\"...\"}."
             ),
@@ -157,6 +175,7 @@ def sales_summary_messages(artifact: dict[str, Any]) -> list[LLMMessage]:
             "metrics": artifact.get("metrics", {}),
             "analysis_request": artifact.get("analysis_request", {}),
             "response_contract": artifact.get("response_contract", {}),
+            "analysis_execution": artifact.get("analysis_execution", {}),
             "auxiliary_context": artifact.get("auxiliary_context", {}),
             "financial_analysis": artifact.get("financial_analysis", {}),
             "highlights": artifact.get("highlights", []),
@@ -175,6 +194,9 @@ def sales_summary_messages(artifact: dict[str, Any]) -> list[LLMMessage]:
                 "si es business_analysis, entrega metricas, lectura comercial breve y una accion; "
                 "obedece response_contract: si safe_to_answer es false, responde solo el error_message "
                 "y no sustituyas la intencion con metricas generales; "
+                "usa analysis_execution para entender filtros, ranking, limites y operaciones aplicadas; "
+                "si un ranking filtro filas sin actividad, no las incluyas ni sugieras que tienen compras; "
+                "explica brevemente la metrica usada cuando el usuario pida mejores, top o ranking; "
                 "si es financial_analysis, usa analysis_request y financial_analysis como contrato: "
                 "si analysis_quality es partial, di que es un analisis financiero parcial basado en "
                 "ventas y margen bruto/productos; no afirmes rentabilidad neta, EBITDA, flujo de caja, "
