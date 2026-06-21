@@ -17,6 +17,7 @@ from app.llm import LLMAdapter, get_llm_adapter
 from app.llm.prompts import agent_router_messages
 from app.streaming import StreamEvent, stream_event, terminal_error_event
 from app.tools import ToolGateway
+from app.tools.catalog import tool_catalog
 from app.tools.sanitize import truncate_text
 from app.workflows.food_cost import FoodCostWorkflow
 from app.workflows.models import (
@@ -137,9 +138,9 @@ class AgentWorkflow:
             return {"route": route}
 
     async def _route_hybrid(self, request: AgentQuestionRequest) -> AgentRoute:
-        deterministic_route = self._route(request)
+        fallback_route = self._route(request)
         if request.workflow or self.settings.llm_provider == "disabled":
-            return deterministic_route
+            return fallback_route
 
         router_model = self.settings.llm_router_model
         with self.tracer.start_as_current_span("llm.agent.router") as span:
@@ -149,15 +150,18 @@ class AgentWorkflow:
             span.set_attribute("llm.model_name", router_model)
             span.set_attribute(
                 "waro.agent.deterministic_domain",
-                deterministic_route.workflow,
+                fallback_route.workflow,
             )
             span.set_attribute(
                 "waro.agent.deterministic_reason",
-                deterministic_route.reason,
+                fallback_route.reason,
             )
             try:
                 response = await self.llm_adapter.complete(
-                    messages=agent_router_messages(question=request.question),
+                    messages=agent_router_messages(
+                        question=request.question,
+                        tool_catalog=tool_catalog(),
+                    ),
                     temperature=0,
                     model=router_model,
                 )
@@ -165,12 +169,12 @@ class AgentWorkflow:
                 route = self._parse_llm_route(response.content)
             except Exception as exc:
                 span.record_exception(exc)
-                span.set_attribute("waro.agent.route.source", "deterministic_after_llm_error")
+                span.set_attribute("waro.agent.route.source", "fallback_after_llm_error")
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 return AgentRoute(
-                    workflow=deterministic_route.workflow,
-                    confidence=deterministic_route.confidence,
-                    reason=f"deterministic_after_llm_error:{deterministic_route.reason}",
+                    workflow=fallback_route.workflow,
+                    confidence=fallback_route.confidence,
+                    reason=f"fallback_after_llm_error:{fallback_route.reason}",
                 )
 
             span.set_attribute("waro.agent.llm_domain", route.workflow)
@@ -185,13 +189,13 @@ class AgentWorkflow:
                 },
             )
 
-            if route.confidence < 0.7:
-                span.set_attribute("waro.agent.route.source", "deterministic_low_llm_confidence")
+            if route.confidence < 0.5:
+                span.set_attribute("waro.agent.route.source", "fallback_low_llm_confidence")
                 span.set_status(Status(StatusCode.OK))
                 return AgentRoute(
-                    workflow=deterministic_route.workflow,
-                    confidence=deterministic_route.confidence,
-                    reason=f"deterministic_low_llm_confidence:{deterministic_route.reason}",
+                    workflow=fallback_route.workflow,
+                    confidence=fallback_route.confidence,
+                    reason=f"fallback_low_llm_confidence:{fallback_route.reason}",
                 )
 
             span.set_attribute("waro.agent.route.source", "llm_prerouter")
@@ -338,28 +342,16 @@ class AgentWorkflow:
             )
 
         normalized = self._normalize(request.question)
-        if self._is_sales_margin_question(normalized):
-            return AgentRoute(
-                workflow="sales",
-                confidence=0.9,
-                reason="sales_margin_keyword",
-            )
-        if self._matches(normalized, FOOD_COST_HINTS):
+        if self._has_food_cost_fallback_signal(normalized):
             return AgentRoute(
                 workflow="food_cost",
-                confidence=0.9,
-                reason="food_cost_keyword",
-            )
-        if self._matches(normalized, SALES_HINTS):
-            return AgentRoute(
-                workflow="sales",
-                confidence=0.85,
-                reason="sales_keyword",
+                confidence=0.65,
+                reason="food_cost_fallback_signal",
             )
         return AgentRoute(
             workflow="sales",
-            confidence=0.5,
-            reason="default_sales",
+            confidence=0.45,
+            reason="fallback_sales",
         )
 
     def _normalize(self, value: str) -> str:
@@ -367,55 +359,13 @@ class AgentWorkflow:
         without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
         return re.sub(r"\s+", " ", without_accents).strip()
 
-    def _matches(self, normalized: str, hints: tuple[str, ...]) -> bool:
-        return any(re.search(pattern, normalized) for pattern in hints)
-
-    def _is_sales_margin_question(self, normalized: str) -> bool:
-        has_margin_signal = bool(
-            re.search(
-                r"\b(margen(?:es)?|rentabilidad|rentables?|bajo margen)\b",
-                normalized,
-            )
-        )
-        has_sales_product_signal = bool(
-            re.search(
-                r"\b(productos?|platos?|items?)\b",
-                normalized,
-            )
-            and re.search(
-                r"\b(venden|vendidos?|vendid[oa]s?|ventas?|ingresos?|cantidad|unidades)\b",
-                normalized,
-            )
-        )
-        has_recipe_signal = bool(
+    def _has_food_cost_fallback_signal(self, normalized: str) -> bool:
+        return bool(
             re.search(
                 r"\b(food\s*cost|costo\s+de\s+comida|recetas?|insumos?|ingredientes?|preparacion)\b",
                 normalized,
             )
         )
-        return has_margin_signal and has_sales_product_signal and not has_recipe_signal
 
 
 WorkflowName = Literal["sales", "food_cost"]
-
-FOOD_COST_HINTS = (
-    r"\bfood\s*cost\b",
-    r"\bcosto\s+de\s+comida\b",
-    r"\bcostos?\b",
-    r"\bmargen(?:es)?\b",
-    r"\brentabilidad\b",
-    r"\brecetas?\b",
-    r"\bproducto[s]?\s+(?:menos|mas)\s+rentable",
-)
-
-SALES_HINTS = (
-    r"\bventas?\b",
-    r"\bvend[ií]\b",
-    r"\bvenden\b",
-    r"\bvendid[oa]s?\b",
-    r"\bvendimos\b",
-    r"\bingresos?\b",
-    r"\bfactur",
-    r"\border(?:es|nes)?\b",
-    r"\bticket\b",
-)

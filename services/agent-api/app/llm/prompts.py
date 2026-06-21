@@ -5,26 +5,63 @@ from app.llm.base import LLMMessage
 from app.tools.sanitize import sanitize_value
 
 
-def agent_router_messages(*, question: str) -> list[LLMMessage]:
-    safe_payload = sanitize_value({"question": question})
+def agent_router_messages(
+    *,
+    question: str,
+    tool_catalog: list[dict[str, Any]],
+) -> list[LLMMessage]:
+    safe_payload = sanitize_value(
+        {
+            "question": question,
+            "available_tools": [
+                {
+                    "name": tool.get("name"),
+                    "domain": tool.get("domain"),
+                    "description": tool.get("description"),
+                    "tags": tool.get("tags"),
+                    "examples": tool.get("examples"),
+                    "capabilities": tool.get("capabilities"),
+                }
+                for tool in tool_catalog
+            ],
+            "workflows": [
+                {
+                    "name": "sales",
+                    "description": (
+                        "Workflow comercial general. Puede planear y ejecutar tools "
+                        "de ventas, clientes, productos financieros, menu y analitica "
+                        "cuando el catalogo de capabilities sea relevante."
+                    ),
+                },
+                {
+                    "name": "food_cost",
+                    "description": (
+                        "Workflow especializado en recetas, ingredientes, insumos, "
+                        "costos de preparacion y food cost operativo."
+                    ),
+                },
+            ],
+        }
+    )
     return [
         LLMMessage(
             role="system",
             content=(
                 "Eres el pre-router de dominio de Kali para WARO. "
                 "No respondas al usuario. Devuelve SOLO JSON valido, sin markdown. "
-                "Tu unica tarea es decidir si la pregunta debe ir al workflow de ventas "
-                "o al workflow de food cost. Usa sales para ventas, ordenes, ingresos, "
-                "ticket promedio, clientes, productos vendidos, analisis comercial o "
-                "analisis financiero basado en ventas/margenes. Preguntas como "
-                "'productos que venden mucho pero tienen bajo margen' van a sales, "
-                "porque cruzan ventas/cantidad con margen comercial. Usa food_cost para "
-                "recetas, costos de preparacion, insumos, margen de receta, costo de "
-                "comida o rentabilidad operativa por producto/receta. Si la pregunta "
-                "es saludo, conversacion general o ambigua, elige sales con baja "
-                "confianza. Formato exacto: "
+                "Tu tarea es elegir el workflow leyendo la pregunta, los workflows y "
+                "available_tools. No uses reglas por palabra aislada: razona por "
+                "capabilities, entidad, medidas, dimensiones y ejemplos. Elige sales "
+                "cuando las tools relevantes esten en ventas, clientes, productos "
+                "financieros, menu o analitica comercial. Elige food_cost solo cuando "
+                "la necesidad sea claramente de recetas, ingredientes, insumos, costos "
+                "de preparacion o food cost operativo. Si la pregunta es saludo, "
+                "conversacion general o ambigua, elige sales con baja confianza. "
+                "Incluye selected_tools con las tools que justifican la ruta. "
+                "Formato exacto: "
                 "{\"workflow\":\"sales|food_cost|unknown\","
-                "\"confidence\":0.0,\"reason\":\"...\"}."
+                "\"confidence\":0.0,\"reason\":\"...\","
+                "\"selected_tools\":[\"waro.sales.metrics\"]}."
             ),
         ),
         LLMMessage(

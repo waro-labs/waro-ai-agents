@@ -125,7 +125,7 @@ def build_workflow(connection: FakeConnection, gateway: FakeGateway) -> AgentWor
     )
 
 
-def test_agent_workflow_routes_by_explicit_workflow_and_keywords():
+def test_agent_workflow_uses_minimal_fallback_routing():
     workflow = AgentWorkflow(settings=Settings())
 
     explicit = workflow._route(
@@ -136,21 +136,21 @@ def test_agent_workflow_routes_by_explicit_workflow_and_keywords():
 
     sales = workflow._route(AgentQuestionRequest(question="dame las ventas de ayer"))
     assert sales.workflow == "sales"
-    assert sales.reason == "sales_keyword"
+    assert sales.reason == "fallback_sales"
 
     food_cost = workflow._route(
-        AgentQuestionRequest(question="que productos tienen peor margen")
+        AgentQuestionRequest(question="que recetas tienen mayor costo de preparacion")
     )
     assert food_cost.workflow == "food_cost"
-    assert food_cost.reason == "food_cost_keyword"
+    assert food_cost.reason == "food_cost_fallback_signal"
 
-    sales_margin = workflow._route(
+    commercial_margin = workflow._route(
         AgentQuestionRequest(
             question="dime qué productos venden mucho pero tienen bajo margen"
         )
     )
-    assert sales_margin.workflow == "sales"
-    assert sales_margin.reason == "sales_margin_keyword"
+    assert commercial_margin.workflow == "sales"
+    assert commercial_margin.reason == "fallback_sales"
 
 
 @pytest.mark.asyncio
@@ -176,6 +176,9 @@ async def test_agent_workflow_uses_router_model_for_hybrid_prerouting():
     assert route.reason.startswith("llm_prerouter:")
     assert llm.call_kwargs[0]["model"] == "kimi-cheap-router"
     assert llm.call_kwargs[0]["temperature"] == 0
+    payload = llm.calls[0][1].content
+    assert "available_tools" in payload
+    assert "waro.financial.products" in payload
 
 
 @pytest.mark.asyncio
@@ -193,7 +196,7 @@ async def test_agent_workflow_falls_back_to_deterministic_router_on_low_confiden
     )
 
     assert route.workflow == "sales"
-    assert route.reason.startswith("deterministic_low_llm_confidence:")
+    assert route.reason.startswith("fallback_low_llm_confidence:")
 
 
 @pytest.mark.asyncio
