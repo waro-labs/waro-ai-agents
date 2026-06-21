@@ -5,6 +5,27 @@ from typing import Any
 
 from app.tools.allowlist import TOOL_SPECS, ToolSpec
 
+DISCOVERY_STOPWORDS = frozenset(
+    {
+        "con",
+        "del",
+        "de",
+        "la",
+        "las",
+        "los",
+        "para",
+        "por",
+        "que",
+        "son",
+        "una",
+        "uno",
+        "the",
+        "and",
+        "for",
+        "with",
+    }
+)
+
 
 def normalize_query(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value.lower())
@@ -49,6 +70,7 @@ class ToolDiscoveryMatch:
             "reasons": list(self.reasons),
             "description": self.spec.description,
             "default_fields": list(self.spec.default_fields),
+            "capabilities": dict(self.spec.capabilities),
         }
         if self.rejected_reason:
             payload["rejected_reason"] = self.rejected_reason
@@ -136,75 +158,36 @@ def _score_tool(
     if preferred_domain and spec.domain == preferred_domain:
         score += 4
         reasons.append(f"preferred_domain:{preferred_domain}")
-    capability_terms = _capability_terms(spec.capabilities)
-    haystack = " ".join(
-        (
-            spec.name,
-            spec.description,
-            *spec.tags,
-            *spec.examples,
-            *capability_terms,
-        )
+    weighted_sources = (
+        ("name", 1, [spec.name]),
+        ("description", 1, [spec.description]),
+        ("tag", 3, list(spec.tags)),
+        ("example", 4, list(spec.examples)),
+        ("capability", 2, _capability_terms(spec.capabilities)),
     )
     matched_tokens: set[str] = set()
-    for token in re.findall(r"[a-z0-9_]+", normalize_query(haystack)):
-        if (
-            len(token) >= 3
-            and token not in matched_tokens
-            and re.search(rf"\b{re.escape(token)}\b", normalized_question)
-        ):
-            matched_tokens.add(token)
-            score += 1
+    matched_sources: set[str] = set()
+    for source_name, weight, values in weighted_sources:
+        for token in re.findall(r"[a-z0-9_]+", normalize_query(" ".join(values))):
+            if (
+                len(token) >= 3
+                and token not in DISCOVERY_STOPWORDS
+                and token not in matched_tokens
+                and re.search(rf"\b{re.escape(token)}\b", normalized_question)
+            ):
+                matched_tokens.add(token)
+                matched_sources.add(source_name)
+                score += weight
+    operations = set(_capability_terms(spec.capabilities.get("supported_operations", [])))
+    if operations.intersection({"aggregate", "group"}) and re.search(
+        r"\b(analisis|metricas?|ventas?|ingresos?|resumen|tendencia)\b",
+        normalized_question,
+    ):
+        score += 5
+        reasons.append("operation:aggregate_or_group")
     if matched_tokens:
-        reasons.append("keyword:" + ",".join(sorted(matched_tokens)[:8]))
-    if spec.name == "waro.sales.metrics" and re.search(
-        r"\b(ventas?|ingresos?|ordenes?|ticket|vendimos|vendido)\b",
-        normalized_question,
-    ):
-        score += 8
-        reasons.append("sales_metrics_signal")
-    if spec.name == "waro.financial.products" and re.search(
-        r"\b(productos?|margen|rentabilidad|ingresos?|costo|cantidad|financier[ao]s?|utilidad|ganancia)\b",
-        normalized_question,
-    ):
-        score += 6
-        reasons.append("financial_product_signal")
-    if spec.name == "waro.menu.products" and re.search(
-        r"\b(menu|productos?|platos?|disponibles?|precio|precios?)\b",
-        normalized_question,
-    ):
-        score += 4
-        reasons.append("menu_product_signal")
-    if spec.name == "waro.analytics.food_cost" and re.search(
-        r"\b(food cost|margen|rentabilidad|costo)\b",
-        normalized_question,
-    ):
-        score += 6
-        reasons.append("food_cost_signal")
-    if spec.name == "waro.analytics.menu" and re.search(
-        r"\b(menu|portafolio|estrella|bajo rendimiento|performance|productos?)\b",
-        normalized_question,
-    ):
-        score += 5
-        reasons.append("menu_analytics_signal")
-    if spec.name == "waro.analytics.alerts" and re.search(
-        r"\b(alertas?|advertencias?|inventario|agotad[oa]s?|riesgo)\b",
-        normalized_question,
-    ):
-        score += 5
-        reasons.append("analytics_alerts_signal")
-    if spec.name == "waro.analytics.data_quality" and re.search(
-        r"\b(calidad de datos|datos|anomalias?|inconsistencias?|validacion)\b",
-        normalized_question,
-    ):
-        score += 5
-        reasons.append("data_quality_signal")
-    if spec.name.startswith("waro.customers") and re.search(
-        r"\b(clientes?|compradores?|retencion|frecuencia|fidelidad|churn|recencia)\b",
-        normalized_question,
-    ):
-        score += 6
-        reasons.append("customer_signal")
+        reasons.append("matched_terms:" + ",".join(sorted(matched_tokens)[:8]))
+        reasons.append("matched_sources:" + ",".join(sorted(matched_sources)))
     return score, reasons
 
 
