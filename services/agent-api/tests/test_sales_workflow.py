@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime as real_datetime
+from datetime import date, datetime as real_datetime
 import json
 from uuid import UUID, uuid4
 
@@ -210,6 +210,42 @@ def test_sales_workflow_resolves_answer_style():
         workflow._resolve_answer_style("hazme un analisis financiero del mes")
         == "financial_analysis"
     )
+
+
+def test_sales_workflow_customer_ticket_average_overrides_value_sort():
+    workflow = SalesWorkflow(settings=Settings())
+    request = SalesQuestionRequest(
+        question="dime los clientes con mayor ticket promedio este mes"
+    )
+    fallback = workflow._fallback_semantic_sales_plan(request)
+
+    validated = workflow._validate_semantic_sales_plan(
+        {
+            "intent": "sales_metrics",
+            "date_from": "2026-06-01",
+            "date_to": "2026-06-20",
+            "answer_style": "business_analysis",
+            "request_kind": "customer_ranking",
+            "area": "customers",
+            "dimensions": ["overall", "customer"],
+            "requested_metrics": ["customer_activity"],
+            "sort_field": "total_spent",
+            "limit": 20,
+            "tools": [{"name": "waro.customers.list"}],
+            "confidence": 0.9,
+            "reason": "llm selected value sort",
+        },
+        request=request,
+        fallback=fallback,
+        today=date(2026, 6, 20),
+    )
+
+    assert validated["sort_field"] == "avg_ticket"
+    assert validated["operations"][1]["by"] == [
+        "avg_ticket",
+        "total_spent",
+        "order_count",
+    ]
 
 
 def test_sales_workflow_product_fallback_does_not_return_generic_sales_summary():

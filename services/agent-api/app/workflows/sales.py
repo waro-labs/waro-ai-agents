@@ -2055,6 +2055,8 @@ class SalesWorkflow:
         sort_field: str | None,
     ) -> str | None:
         if request_kind == "customer_ranking":
+            if re.search(r"\b(ticket|ticket\s+promedio|promedio)\b", normalized):
+                return "avg_ticket"
             if re.search(r"\b(frecuencia|frecuentes?|compran|compras|ordenes?)\b", normalized):
                 return "order_count"
             if re.search(r"\b(mejores?|valor|gasto|comprado|compraron|dinero|ingresos?)\b", normalized):
