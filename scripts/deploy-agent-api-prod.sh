@@ -27,25 +27,50 @@ ensure_waro_cli() {
   local source_dir="$REPO/../waro-cli"
   local marker="$REPO/services/agent-api/.local/bin/waro.gitrev"
   local source_rev=""
+  local installed_rev=""
   local needs_build="false"
+  local build_reason=""
   if [[ -f "$source_dir/Cargo.toml" ]]; then
     (cd "$source_dir" && git pull origin main >/dev/null)
     source_rev="$(cd "$source_dir" && git rev-parse HEAD)"
+    installed_rev="$(cat "$marker" 2>/dev/null || true)"
   fi
   if [[ ! -x "$cli" ]]; then
     needs_build="true"
+    build_reason="missing_binary"
   elif ! "$cli" --help 2>/dev/null | grep -q 'agent-json'; then
     needs_build="true"
+    build_reason="missing_agent_json_output"
   elif ! "$cli" schema customers list 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); fields=((d.get("response") or {}).get("fields") or []); raise SystemExit(0 if fields else 1)'; then
     needs_build="true"
-  elif [[ -n "$source_rev" && "$(cat "$marker" 2>/dev/null || true)" != "$source_rev" ]]; then
+    build_reason="missing_response_contracts"
+  elif ! "$cli" schema analytics waros >/dev/null 2>&1; then
     needs_build="true"
+    build_reason="missing_analytics_waros_schema"
+  elif ! "$cli" schema analytics cohort >/dev/null 2>&1; then
+    needs_build="true"
+    build_reason="missing_analytics_cohort_schema"
+  elif ! "$cli" schema analytics rfm >/dev/null 2>&1; then
+    needs_build="true"
+    build_reason="missing_analytics_rfm_schema"
+  elif ! "$cli" schema analytics churn-risk >/dev/null 2>&1; then
+    needs_build="true"
+    build_reason="missing_analytics_churn_risk_schema"
+  elif [[ -n "$source_rev" && "$installed_rev" != "$source_rev" ]]; then
+    needs_build="true"
+    build_reason="source_rev_changed"
   fi
+  echo "WARO CLI source rev: ${source_rev:-unknown}"
+  echo "WARO CLI installed rev: ${installed_rev:-unknown}"
+  echo "WARO CLI rebuild: $needs_build${build_reason:+ ($build_reason)}"
   if [[ "$needs_build" == "true" ]]; then
     if [[ -f "$source_dir/Cargo.toml" ]]; then
       echo "WARO CLI no tiene contrato agent-json actualizado; reconstruyendo desde $source_dir..."
       (cd "$REPO/services/agent-api" && ./scripts/build-linux-waro-cli.sh --source "$source_dir")
       [[ -n "$source_rev" ]] && echo "$source_rev" > "$marker"
+      installed_rev="$source_rev"
+    else
+      echo "No se encontro source de WARO CLI en $source_dir; no se puede reconstruir." >&2
     fi
   fi
   [[ -x "$cli" ]] || { echo "Falta WARO CLI ejecutable: $cli"; exit 1; }
@@ -57,7 +82,24 @@ ensure_waro_cli() {
     echo "WARO CLI en $cli no expone response contracts en waro schema."
     exit 1
   }
+  "$cli" schema analytics waros >/dev/null 2>&1 || {
+    echo "WARO CLI en $cli no expone analytics waros. Reconstruye con: cd $REPO/services/agent-api && ./scripts/build-linux-waro-cli.sh --source $source_dir"
+    exit 1
+  }
+  "$cli" schema analytics cohort >/dev/null 2>&1 || {
+    echo "WARO CLI en $cli no expone analytics cohort. Reconstruye con: cd $REPO/services/agent-api && ./scripts/build-linux-waro-cli.sh --source $source_dir"
+    exit 1
+  }
+  "$cli" schema analytics rfm >/dev/null 2>&1 || {
+    echo "WARO CLI en $cli no expone analytics rfm. Reconstruye con: cd $REPO/services/agent-api && ./scripts/build-linux-waro-cli.sh --source $source_dir"
+    exit 1
+  }
+  "$cli" schema analytics churn-risk >/dev/null 2>&1 || {
+    echo "WARO CLI en $cli no expone analytics churn-risk. Reconstruye con: cd $REPO/services/agent-api && ./scripts/build-linux-waro-cli.sh --source $source_dir"
+    exit 1
+  }
   echo "WARO CLI: $("$cli" --version 2>/dev/null || echo ok)"
+  echo "WARO CLI installed rev final: ${installed_rev:-$(cat "$marker" 2>/dev/null || echo unknown)}"
 }
 
 upsert_env_from_python() {
