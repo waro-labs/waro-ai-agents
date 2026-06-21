@@ -14,6 +14,7 @@ from app.dependencies.internal_auth import InternalRequestContext
 from app.llm.base import LLMError, LLMMessage, LLMResponse
 from app.tools.allowlist import TOOL_SPECS
 from app.tools.models import ToolCallResponse
+from app.tools.response_contract import ResponseContract
 from app.tools.registry import ToolRegistry, set_tool_registry
 
 
@@ -167,6 +168,22 @@ def test_plan_validator_accepts_financial_and_food_cost_for_product_margin():
         "waro.financial.products",
         "waro.analytics.food_cost",
     }
+
+
+def test_capability_uses_schema_default_fields_over_legacy_defaults():
+    contract = ResponseContract(
+        command=("analytics", "menu"),
+        shape="rows",
+        row_path="data",
+        fields=("data",),
+        default_fields=("data",),
+        top_level_keys=("data",),
+    )
+    capability = capability_from_spec(
+        TOOL_SPECS["waro.analytics.menu"],
+        response_contract=contract,
+    )
+    assert capability.default_fields == ("data",)
 
 
 @pytest.mark.asyncio

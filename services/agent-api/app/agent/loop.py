@@ -64,6 +64,11 @@ class AgentLoop:
                         if snapshot.schemas.get(name) is not None
                         else None
                     ),
+                    response_contract=(
+                        snapshot.schemas.get(name).response
+                        if snapshot.schemas.get(name) is not None
+                        else None
+                    ),
                 )
                 for name, spec in snapshot.tools.items()
             ]

@@ -5,6 +5,7 @@ from typing import Any
 
 from app.agent.intent import QuestionIntent, normalize_measure, normalize_text
 from app.tools.allowlist import ToolSpec
+from app.tools.response_contract import ResponseContract
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,12 @@ class CapabilityMatch:
         return payload
 
 
-def capability_from_spec(spec: ToolSpec, *, arguments_schema: dict[str, Any] | None = None) -> ToolCapability:
+def capability_from_spec(
+    spec: ToolSpec,
+    *,
+    arguments_schema: dict[str, Any] | None = None,
+    response_contract: ResponseContract | None = None,
+) -> ToolCapability:
     raw = dict(spec.capabilities or {})
     measures = tuple(_dedupe(normalize_measure(str(item)) for item in _list(raw.get("measures"))))
     dimensions = tuple(_dedupe(normalize_measure(str(item)) for item in _list(raw.get("dimensions"))))
@@ -64,8 +70,19 @@ def capability_from_spec(spec: ToolSpec, *, arguments_schema: dict[str, Any] | N
         dimensions=dimensions,
         operations=operations,
         supports_period=bool(raw.get("supports_period", False)),
-        default_fields=tuple(spec.default_fields),
+        default_fields=tuple(response_contract.default_fields if response_contract else spec.default_fields),
         arguments_schema=arguments_schema or spec.args_model.model_json_schema(by_alias=True),
+        response_contract=(
+            {
+                "shape": response_contract.shape,
+                "row_path": response_contract.row_path,
+                "fields": list(response_contract.fields),
+                "default_fields": list(response_contract.default_fields),
+                "top_level_keys": list(response_contract.top_level_keys),
+            }
+            if response_contract
+            else None
+        ),
         can_answer_patterns=tuple(spec.examples),
         cannot_answer_patterns=(),
     )
