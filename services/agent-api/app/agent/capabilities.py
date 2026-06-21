@@ -169,6 +169,11 @@ def _score_capability(
     if operation_hits:
         score += len(operation_hits)
         reasons.append("operations:" + ",".join(sorted(operation_hits)))
+    if intent.entity == "product" and "margin" in intent.measures:
+        profitability_context = set(capability.measures).intersection({"cost", "profit"})
+        if profitability_context:
+            score += 2
+            reasons.append("profitability_context:" + ",".join(sorted(profitability_context)))
     if intent.time_range.date_from and capability.supports_period:
         score += 2
         reasons.append("period")

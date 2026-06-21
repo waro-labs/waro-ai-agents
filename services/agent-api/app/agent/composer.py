@@ -30,7 +30,9 @@ async def compose_agent_summary(
             model=model_for(settings, step="compose", complexity=complexity),
         )
         content = response.content.strip()
-        return content or fallback
+        if not content or _prefer_factual_fallback(artifact=artifact, content=content, fallback=fallback):
+            return fallback
+        return content
     except Exception:
         return fallback
 
@@ -52,3 +54,12 @@ def deterministic_summary(artifact: dict[str, Any]) -> str:
         elif rows:
             parts.append(f"{tool}: {len(rows)} filas.")
     return " ".join(parts)
+
+
+def _prefer_factual_fallback(*, artifact: dict[str, Any], content: str, fallback: str) -> bool:
+    strategy = artifact.get("answer_strategy") if isinstance(artifact.get("answer_strategy"), dict) else {}
+    if strategy.get("type") != "ranking":
+        return False
+    fallback_has_values = any(token in fallback for token in ("$", "%", " unidades", " ordenes"))
+    content_has_values = any(token in content for token in ("$", "%", " unidades", " ordenes"))
+    return fallback_has_values and not content_has_values

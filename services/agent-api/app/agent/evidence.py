@@ -99,10 +99,14 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
     period = intent.get("time_range", {}).get("label") if isinstance(intent.get("time_range"), dict) else ""
     strategy_payload = artifact.get("answer_strategy") if isinstance(artifact.get("answer_strategy"), dict) else {}
     strategy = str(strategy_payload.get("type") or "")
+    if strategy in {"follow_up", "recommendation"} and not rows:
+        rows = _previous_ranked_rows(artifact)
 
     if strategy == "recommendation":
         return _recommendation_summary(artifact, period)
     if strategy == "diagnosis" and entity == "business":
+        if bool(strategy_payload.get("avoid_repeating")):
+            return _business_follow_up_summary(artifact, period)
         return _business_analysis_summary(artifact, period)
     if strategy == "comparison" and entity == "customer" and rows:
         return _customer_comparison_summary(rows, period)
@@ -255,6 +259,13 @@ def _context_usage(*, question: str, conversation_state: dict[str, Any] | None) 
         "active_entity": conversation_state.get("active_entity"),
         "active_period": conversation_state.get("active_period"),
     }
+
+
+def _previous_ranked_rows(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    context = artifact.get("conversation_state") if isinstance(artifact.get("conversation_state"), dict) else {}
+    previous = context.get("last_artifact") if isinstance(context.get("last_artifact"), dict) else {}
+    rows = previous.get("ranked_rows") if isinstance(previous.get("ranked_rows"), list) else []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def _open_questions(intent: QuestionIntent, analysis: dict[str, Any]) -> list[str]:
@@ -523,6 +534,7 @@ def _recommendation_summary(artifact: dict[str, Any], period: str | None) -> str
     actions = _string_items(analysis.get("recommended_actions"))[:5]
     if not actions:
         actions = _string_items(context.get("prior_actions"))[:5]
+    actions = _dedupe_text_items(actions)
     if not actions and artifact.get("ranked_rows"):
         actions = [
             "Prioriza acciones sobre los segmentos o items con mayor concentracion en el ranking.",
@@ -547,6 +559,44 @@ def _recommendation_summary(artifact: dict[str, Any], period: str | None) -> str
         lines.extend(f"- {item}" for item in actions)
     if len(lines) == 1:
         lines.append("No encontre acciones suficientemente respaldadas por la evidencia disponible.")
+    return "\n".join(lines)
+
+
+def _business_follow_up_summary(artifact: dict[str, Any], period: str | None) -> str:
+    analysis = artifact.get("analysis") if isinstance(artifact.get("analysis"), dict) else {}
+    context = artifact.get("conversation_state") if isinstance(artifact.get("conversation_state"), dict) else {}
+    previous = context.get("last_artifact") if isinstance(context.get("last_artifact"), dict) else {}
+    previous_summary = str(context.get("last_summary") or previous.get("summary") or "")
+    facts = _dedupe_text_items(_string_items(analysis.get("facts")))
+    patterns = _dedupe_text_items(_string_items(analysis.get("patterns")))
+    risks = _dedupe_text_items(_string_items(analysis.get("risks")))
+    opportunities = _dedupe_text_items(_string_items(analysis.get("opportunities")))
+    actions = _dedupe_text_items(_string_items(analysis.get("recommended_actions")))
+
+    lines = [f"Otro angulo para {_period_label(period)}:"]
+    if patterns:
+        lines.append("")
+        lines.append("Lecturas adicionales:")
+        lines.extend(f"- {item}" for item in _exclude_seen(patterns, previous_summary)[:4])
+    if opportunities:
+        lines.append("")
+        lines.append("Oportunidades no obvias:")
+        lines.extend(f"- {item}" for item in _exclude_seen(opportunities, previous_summary)[:3])
+    if risks:
+        lines.append("")
+        lines.append("Riesgos a revisar:")
+        lines.extend(f"- {item}" for item in _exclude_seen(risks, previous_summary)[:3])
+    if actions:
+        lines.append("")
+        lines.append("Siguiente analisis recomendado:")
+        lines.extend(f"- {item}" for item in _exclude_seen(actions, previous_summary)[:3])
+    if len(lines) == 1 and facts:
+        lines.append("")
+        lines.append("Base disponible:")
+        lines.extend(f"- {item}" for item in facts[:3])
+        lines.append("- Para avanzar, compara este periodo contra uno anterior equivalente y separa ventas genericas de clientes identificados.")
+    if len(lines) == 1:
+        lines.append("No encontre un angulo nuevo suficientemente respaldado por la evidencia actual.")
     return "\n".join(lines)
 
 
@@ -582,6 +632,24 @@ def _product_title(measures: set[str], period: str | None) -> str:
     if has_revenue:
         return f"Productos con mayor valor vendido para {label}:"
     return f"Productos para {label}:"
+
+
+def _dedupe_text_items(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        normalized = normalized_any(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(item)
+    return result
+
+
+def _exclude_seen(items: list[str], previous_summary: str) -> list[str]:
+    previous = normalized_any(previous_summary)
+    filtered = [item for item in items if normalized_any(item) not in previous]
+    return filtered or items
 
 
 def _profile_groups(profile) -> set[str]:

@@ -104,7 +104,8 @@ def heuristic_answer_strategy(
             avoid_repeating=avoid_repeating,
             reasoning_focus=("actions", "risks", "opportunities"),
         )
-    if "compare" in intent.operations or re.search(r"\b(compara|contra|vs|versus)\b", normalized):
+    explicit_compare = bool(re.search(r"\b(compara|contra|vs|versus)\b", normalized))
+    if explicit_compare:
         return AnswerStrategy(
             type="comparison",
             objective="Comparar los segmentos o metricas solicitadas con evidencia.",

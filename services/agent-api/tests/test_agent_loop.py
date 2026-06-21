@@ -214,6 +214,17 @@ def test_answer_strategy_recommends_from_contextual_follow_up():
     assert strategy.use_previous_artifact is True
 
 
+def test_answer_strategy_business_follow_up_is_diagnosis_not_comparison():
+    strategy = heuristic_answer_strategy(
+        question="que mas me puedes decir del negocio",
+        intent=heuristic_intent("que mas me puedes decir del negocio"),
+        artifact={"safe_to_answer": True},
+        conversation_state={"source": "artifact", "active_entity": "business"},
+    )
+    assert strategy.type == "diagnosis"
+    assert strategy.avoid_repeating is True
+
+
 def _dynamic_capability(
     *,
     tool_name: str,
@@ -294,6 +305,23 @@ def test_capability_matcher_routes_cohort_question_to_cohort_tool():
     plan = build_tool_plan(intent, matches)
     assert plan.valid is True
     assert [step.tool_name for step in plan.steps] == ["waro.analytics.cohort"]
+
+
+def test_capability_matcher_prefers_profitability_context_for_product_margin():
+    intent = resolve_contextual_intent(
+        heuristic_intent("que margen tienen"),
+        question="que margen tienen",
+        conversation_state={"source": "artifact", "active_entity": "product", "active_grain": "product_period"},
+    )
+    matches = match_tools(
+        intent,
+        [
+            capability_from_spec(TOOL_SPECS["waro.analytics.menu"]),
+            capability_from_spec(TOOL_SPECS["waro.financial.products"]),
+        ],
+        scopes=("analytics:read", "financial:read"),
+    )
+    assert matches[0].capability.tool_name == "waro.financial.products"
 
 
 def test_business_analysis_plan_uses_multiple_capability_domains():
@@ -451,6 +479,51 @@ def test_product_ranking_summary_does_not_add_margin_when_not_requested():
     assert "bajo margen" not in summary
     assert "margen 12%" not in summary
     assert "50 unidades" in summary
+
+
+def test_product_follow_up_margin_uses_previous_ranked_rows_when_current_rows_missing():
+    intent = resolve_contextual_intent(
+        heuristic_intent("que margen tienen"),
+        question="que margen tienen",
+        conversation_state={
+            "source": "artifact",
+            "active_entity": "product",
+            "active_grain": "product_period",
+            "last_artifact": {
+                "ranked_rows": [
+                    {"name": "Burger", "quantity": 50, "revenue": 1000000, "margin": 12}
+                ]
+            },
+        },
+    )
+    plan = build_tool_plan(
+        intent,
+        match_tools(
+            intent,
+            [capability_from_spec(TOOL_SPECS["waro.financial.products"])],
+            scopes=("financial:read",),
+        ),
+    )
+    artifact = build_evidence_artifact(
+        question="que margen tienen",
+        intent=intent,
+        plan=plan,
+        observations=[],
+        conversation_state={
+            "source": "artifact",
+            "active_entity": "product",
+            "last_artifact": {
+                "ranked_rows": [
+                    {"name": "Burger", "quantity": 50, "revenue": 1000000, "margin": 12}
+                ]
+            },
+        },
+    )
+    artifact["safe_to_answer"] = True
+    artifact["answer_strategy"] = {"type": "follow_up", "use_previous_artifact": True}
+    summary = deterministic_evidence_summary(artifact)
+    assert "Burger" in summary
+    assert "margen 12%" in summary
 
 
 def test_evidence_summarizes_waros_customer_rows():
