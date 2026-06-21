@@ -7,7 +7,7 @@ import pytest
 from app.agent.classifier import classify_complexity, heuristic_complexity
 from app.agent.capabilities import ToolCapability, capability_from_spec, match_tools
 from app.agent.evidence import build_evidence_artifact, deterministic_evidence_summary
-from app.agent.intent import coerce_intent, heuristic_intent, resolve_contextual_intent
+from app.agent.intent import coerce_intent, heuristic_intent, parse_question_intent, resolve_contextual_intent
 from app.agent.loop import AgentLoop
 from app.agent.plan import build_tool_plan
 from app.agent.profiles import profile_for_intent
@@ -39,6 +39,16 @@ class FakeLLM:
             return LLMResponse(content=json.dumps(self.verify), model=model or "test", provider="kimi")
         decision = self.decisions[min(self.calls - 1, len(self.decisions) - 1)]
         return LLMResponse(content=json.dumps(decision), model=model or "test", provider="kimi")
+
+
+class IntentLLM:
+    provider = "kimi"
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def complete(self, *, messages, temperature=0.2, model=None):
+        return LLMResponse(content=json.dumps(self.payload), model=model or "test", provider="kimi")
 
 
 class FakeGateway:
@@ -181,6 +191,67 @@ async def test_question_intent_customer_cohort_retention():
     assert intent.grain == "cohort_period"
     assert "retention_pct" in intent.measures
     assert "cohort" in intent.dimensions
+
+
+def test_coerce_intent_lets_llm_replace_generic_fallback_measures():
+    fallback = heuristic_intent("diagnostico del negocio")
+    intent = coerce_intent(
+        {
+            "entity": "product",
+            "grain": "product_period",
+            "measures": ["quantity_sold"],
+            "dimensions": ["product"],
+            "operations": ["rank"],
+        },
+        fallback=fallback,
+        source="llm",
+    )
+    assert intent.entity == "product"
+    assert intent.measures == ("quantity_sold",)
+    assert "margin" not in intent.measures
+    assert intent.operations == ("rank",)
+
+
+@pytest.mark.asyncio
+async def test_parse_question_intent_applies_context_to_llm_result():
+    intent = await parse_question_intent(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test"),
+        llm_adapter=IntentLLM(
+            {
+                "entity": "sale",
+                "grain": "period",
+                "measures": ["margin"],
+                "dimensions": [],
+                "operations": ["aggregate"],
+                "time_range": {
+                    "date_from": None,
+                    "date_to": None,
+                    "timezone": "America/Bogota",
+                    "label": "",
+                },
+                "answer_goal": "que margen tienen",
+                "requires_cross_tool": False,
+                "confidence": 0.7,
+                "ambiguities": [],
+            }
+        ),
+        question="que margen tienen",
+        conversation_state={
+            "source": "artifact",
+            "active_entity": "product",
+            "active_grain": "product_period",
+            "active_period": {
+                "date_from": None,
+                "date_to": None,
+                "timezone": "America/Bogota",
+                "label": "",
+            },
+        },
+        capability_hints=[capability_from_spec(TOOL_SPECS["waro.financial.products"]).to_dict()],
+    )
+    assert intent.entity == "product"
+    assert intent.grain == "product_period"
+    assert "margin" in intent.measures
 
 
 def test_contextual_intent_inherits_product_entity_and_period():

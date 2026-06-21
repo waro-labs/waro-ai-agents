@@ -150,7 +150,7 @@ async def parse_question_intent(
         )
         parsed = json.loads(response.content.strip())
         if isinstance(parsed, dict):
-            return coerce_intent(
+            intent = coerce_intent(
                 parsed,
                 fallback=fallback,
                 source="llm",
@@ -407,11 +407,22 @@ def coerce_intent(
         timezone=str(time_payload.get("timezone") or fallback.time_range.timezone),
         label=str(time_payload.get("label") or fallback.time_range.label),
     )
-    measures = tuple(normalize_measures_for_entity(entity, _dedupe([*fallback.measures, *_string_list(payload.get("measures"))])))
-    dimensions = tuple(_dedupe([*fallback.dimensions, *_string_list(payload.get("dimensions"))]))
+    payload_measures = _string_list(payload.get("measures"))
+    payload_dimensions = _string_list(payload.get("dimensions"))
+    payload_operations = _string_list(payload.get("operations"))
+    if _is_specific_domain_intent(fallback):
+        raw_measures = [*fallback.measures, *payload_measures]
+        raw_dimensions = [*fallback.dimensions, *payload_dimensions]
+        raw_operations = [*fallback.operations, *payload_operations]
+    else:
+        raw_measures = payload_measures or list(fallback.measures)
+        raw_dimensions = payload_dimensions or list(fallback.dimensions)
+        raw_operations = payload_operations or list(fallback.operations)
+    measures = tuple(normalize_measures_for_entity(entity, _dedupe(raw_measures)))
+    dimensions = tuple(_dedupe(raw_dimensions))
     operations = tuple(
         item
-        for item in _dedupe([*fallback.operations, *_string_list(payload.get("operations"))])
+        for item in _dedupe(raw_operations)
         if item in allowed["operations"]
     )
     return QuestionIntent(
