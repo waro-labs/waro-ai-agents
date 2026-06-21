@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from app.agent.artifact import build_agent_artifact
 from app.agent.classifier import classify_complexity
 from app.agent.composer import compose_agent_summary, deterministic_summary
 from app.agent.conversation import load_conversation_messages
@@ -56,22 +55,14 @@ class KaliAgentRunner:
             conversation_messages=conversation_messages,
         )
         complexity: Complexity = classification["complexity"]
-        if complexity == "simple":
-            artifact = await self.loop.run_fast_path(
-                question=question,
-                context=context,
-                run_id=run_id,
-                complexity=complexity,
-                conversation_messages=conversation_messages,
-            )
-        else:
-            artifact = await self.loop.run(
-                question=question,
-                context=context,
-                run_id=run_id,
-                complexity=complexity,
-                conversation_messages=conversation_messages,
-            )
+        artifact = await self.loop.run(
+            question=question,
+            context=context,
+            run_id=run_id,
+            complexity=complexity,
+            conversation_messages=conversation_messages,
+            classification=classification,
+        )
         artifact["classification"] = classification
         fallback = deterministic_summary(artifact)
         summary = await compose_agent_summary(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.agent.evidence import deterministic_evidence_summary
 from app.agent.prompts import compose_summary_messages
 from app.config import Settings
 from app.llm.base import LLMAdapter
@@ -35,6 +36,8 @@ async def compose_agent_summary(
 
 
 def deterministic_summary(artifact: dict[str, Any]) -> str:
+    if artifact.get("agent_engine_version") == "intent-capability-v1":
+        return deterministic_evidence_summary(artifact)
     if not artifact.get("safe_to_answer"):
         return str(artifact.get("error_message") or "No pude responder con los datos disponibles.")
     tables = artifact.get("tables") if isinstance(artifact.get("tables"), list) else []

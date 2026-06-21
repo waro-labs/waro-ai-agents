@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime
 from typing import Any
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
-from app.agent.artifact import build_agent_artifact
-from app.agent.classifier import classify_complexity
-from app.agent.prompts import agent_step_messages, verify_answer_messages
+from app.agent.capabilities import capability_from_spec, match_tools
+from app.agent.evidence import build_evidence_artifact
+from app.agent.intent import parse_question_intent
+from app.agent.plan import build_tool_plan
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
 from app.llm.base import LLMAdapter
-from app.llm.model_router import Complexity, max_agent_steps, model_for
+from app.llm.model_router import Complexity
 from app.tools import ToolCallRequest, ToolGateway
-from app.tools.catalog import discover_tools
 from app.tools.registry import ToolRegistry, coerce_args_async
 
 
@@ -44,269 +41,110 @@ class AgentLoop:
         run_id: UUID,
         complexity: Complexity,
         conversation_messages: list[dict[str, str]] | None = None,
+        classification: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        today = datetime.now(ZoneInfo("America/Bogota")).date()
-        catalog = await self.registry.catalog_metadata()
-        scoped_catalog = [
-            tool
-            for tool in catalog
-            if str(tool.get("scope")) in context.scopes
-        ]
-        observations: list[dict[str, Any]] = []
-        max_steps = max_agent_steps(self.settings, complexity)
-        repeat_tracker: dict[str, int] = {}
-
-        for step in range(1, max_steps + 1):
-            decision = await self._next_decision(
+        with self.tracer.start_as_current_span("agent.intent_capability_loop") as span:
+            span.set_attribute("waro.agent.engine_version", "intent-capability-v1")
+            intent = await parse_question_intent(
+                settings=self.settings,
+                llm_adapter=self.llm_adapter,
                 question=question,
-                today=today.isoformat(),
-                catalog=scoped_catalog,
+                conversation_messages=conversation_messages,
+            )
+            span.set_attribute("waro.intent.entity", intent.entity)
+            span.set_attribute("waro.intent.measures", ",".join(intent.measures))
+            span.set_attribute("waro.intent.operations", ",".join(intent.operations))
+
+            snapshot = await self.registry.refresh()
+            capabilities = [
+                capability_from_spec(
+                    spec,
+                    arguments_schema=(
+                        snapshot.schemas.get(name).arguments_schema
+                        if snapshot.schemas.get(name) is not None
+                        else None
+                    ),
+                )
+                for name, spec in snapshot.tools.items()
+            ]
+            matches = match_tools(intent, capabilities, scopes=context.scopes)
+            plan = build_tool_plan(intent, matches)
+            span.set_attribute("waro.plan.valid", plan.valid)
+            span.set_attribute("waro.plan.missing_coverage", ",".join(plan.missing_coverage))
+
+            observations: list[dict[str, Any]] = []
+            if plan.valid:
+                observations = await self._execute_plan(
+                    plan_steps=plan.steps,
+                    context=context,
+                    run_id=run_id,
+                )
+            artifact = build_evidence_artifact(
+                question=question,
+                intent=intent,
+                plan=plan,
                 observations=observations,
                 conversation_messages=conversation_messages,
-                complexity=complexity,
-                step=step,
-                max_steps=max_steps,
+                classification=classification or {"complexity": complexity},
             )
-            if decision.get("action") == "finish":
-                break
-            tool_name = str(decision.get("tool_name") or "")
-            arguments = decision.get("arguments") if isinstance(decision.get("arguments"), dict) else {}
-            if not tool_name:
-                break
-            repeat_key = json.dumps({"tool": tool_name, "arguments": arguments}, sort_keys=True)
-            repeat_tracker[repeat_key] = repeat_tracker.get(repeat_key, 0) + 1
-            if repeat_tracker[repeat_key] > 2:
-                break
-            spec = await self.registry.get_spec(tool_name)
+            span.set_attribute("waro.answerability.status", str(artifact.get("answerability")))
+            span.set_status(Status(StatusCode.OK))
+            return artifact
+
+    async def _execute_plan(
+        self,
+        *,
+        plan_steps,
+        context: InternalRequestContext,
+        run_id: UUID,
+    ) -> list[dict[str, Any]]:
+        observations: list[dict[str, Any]] = []
+        for step in plan_steps:
+            spec = await self.registry.get_spec(step.tool_name)
             if spec is None or spec.scope not in context.scopes:
                 observations.append(
                     {
-                        "tool_name": tool_name,
+                        "tool_name": step.tool_name,
                         "status": "failed",
-                        "error": "unknown_or_forbidden_tool",
-                        "arguments": arguments,
+                        "arguments": step.arguments,
+                        "fields": list(step.fields),
+                        "error": {"message": "unknown_or_forbidden_tool"},
                     }
                 )
                 continue
             try:
-                args = await coerce_args_async(spec, arguments)
+                args = await coerce_args_async(spec, step.arguments)
             except Exception as exc:
                 observations.append(
                     {
-                        "tool_name": tool_name,
+                        "tool_name": step.tool_name,
                         "status": "failed",
-                        "error": str(exc),
-                        "arguments": arguments,
+                        "arguments": step.arguments,
+                        "fields": list(step.fields),
+                        "error": {"message": str(exc), "kind": "validation"},
                     }
                 )
                 continue
             response = await self.gateway.call(
                 request=ToolCallRequest(
                     run_id=run_id,
-                    tool_name=tool_name,
+                    tool_name=step.tool_name,
                     arguments=args.model_dump(by_alias=True, mode="json", exclude_none=True),
-                    fields=list(spec.default_fields),
+                    fields=list(step.fields),
                 ),
                 context=context,
             )
             observations.append(
                 {
-                    "tool_name": tool_name,
+                    "tool_name": step.tool_name,
                     "status": response.status,
-                    "arguments": arguments,
+                    "arguments": step.arguments,
+                    "fields": list(step.fields),
+                    "purpose": step.purpose,
+                    "expected_evidence": list(step.expected_evidence),
                     "result_summary": response.result_summary,
                     "result": response.result if isinstance(response.result, dict) else {},
                     "error": response.error,
                 }
             )
-
-        verification = await self._verify(
-            question=question,
-            observations=observations,
-            complexity=complexity,
-        )
-        return build_agent_artifact(
-            question=question,
-            observations=observations,
-            complexity=complexity,
-            verification=verification,
-            conversation_messages=conversation_messages,
-        )
-
-    async def run_fast_path(
-        self,
-        *,
-        question: str,
-        context: InternalRequestContext,
-        run_id: UUID,
-        complexity: Complexity,
-        conversation_messages: list[dict[str, str]] | None = None,
-    ) -> dict[str, Any]:
-        discovery = discover_tools(
-            question,
-            scopes=context.scopes,
-            limit=5,
-        )
-        available = discovery.get("available") or []
-        if not available:
-            return build_agent_artifact(
-                question=question,
-                observations=[],
-                complexity=complexity,
-                verification={"safe_to_answer": False, "missing": "No hay tools disponibles."},
-                conversation_messages=conversation_messages,
-            )
-        tool_name = str(available[0].get("name"))
-        spec = await self.registry.get_spec(tool_name)
-        if spec is None:
-            return build_agent_artifact(
-                question=question,
-                observations=[],
-                complexity=complexity,
-                verification={"safe_to_answer": False, "missing": f"Tool {tool_name} no registrada."},
-                conversation_messages=conversation_messages,
-            )
-        response = await self.gateway.call(
-            request=ToolCallRequest(
-                run_id=run_id,
-                tool_name=tool_name,
-                arguments={},
-                fields=list(spec.default_fields),
-            ),
-            context=context,
-        )
-        observations = [
-            {
-                "tool_name": tool_name,
-                "status": response.status,
-                "arguments": {},
-                "result_summary": response.result_summary,
-                "result": response.result if isinstance(response.result, dict) else {},
-                "error": response.error,
-            }
-        ]
-        verification = await self._verify(
-            question=question,
-            observations=observations,
-            complexity=complexity,
-        )
-        return build_agent_artifact(
-            question=question,
-            observations=observations,
-            complexity=complexity,
-            verification=verification,
-            conversation_messages=conversation_messages,
-        )
-
-    async def _next_decision(
-        self,
-        *,
-        question: str,
-        today: str,
-        catalog: list[dict[str, Any]],
-        observations: list[dict[str, Any]],
-        conversation_messages: list[dict[str, str]] | None,
-        complexity: Complexity,
-        step: int,
-        max_steps: int,
-    ) -> dict[str, Any]:
-        if self.settings.llm_provider == "disabled":
-            if observations:
-                return {"action": "finish", "tool_name": None, "arguments": {}, "reason": "llm_disabled"}
-            if catalog:
-                return {
-                    "action": "call_tool",
-                    "tool_name": catalog[0]["name"],
-                    "arguments": {},
-                    "reason": "heuristic_first_tool",
-                }
-            return {"action": "finish", "tool_name": None, "arguments": {}, "reason": "no_tools"}
-
-        messages = agent_step_messages(
-            question=question,
-            today=today,
-            timezone="America/Bogota",
-            available_tools=catalog,
-            observations=observations,
-            conversation_messages=conversation_messages,
-            step=step,
-            max_steps=max_steps,
-        )
-        with self.tracer.start_as_current_span("llm.agent.step") as span:
-            span.set_attribute("agent.step", step)
-            span.set_attribute("agent.complexity", complexity)
-            try:
-                response = await self.llm_adapter.complete(
-                    messages=messages,
-                    temperature=0,
-                    model=model_for(self.settings, step="agent_step", complexity=complexity),
-                )
-            except Exception as exc:
-                span.record_exception(exc)
-                span.set_status(Status(StatusCode.ERROR, str(exc)))
-                if observations:
-                    return {
-                        "action": "finish",
-                        "tool_name": None,
-                        "arguments": {},
-                        "reason": f"llm_error_after_observation:{type(exc).__name__}",
-                    }
-                if catalog:
-                    return {
-                        "action": "call_tool",
-                        "tool_name": catalog[0]["name"],
-                        "arguments": {},
-                        "reason": f"heuristic_first_tool_after_llm_error:{type(exc).__name__}",
-                    }
-                return {
-                    "action": "finish",
-                    "tool_name": None,
-                    "arguments": {},
-                    "reason": f"llm_error_no_tools:{type(exc).__name__}",
-                }
-            span.set_status(Status(StatusCode.OK))
-        try:
-            parsed = json.loads(response.content.strip())
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-        return {"action": "finish", "tool_name": None, "arguments": {}, "reason": "parse_error"}
-
-    async def _verify(
-        self,
-        *,
-        question: str,
-        observations: list[dict[str, Any]],
-        complexity: Complexity,
-    ) -> dict[str, Any]:
-        artifact_preview = build_agent_artifact(
-            question=question,
-            observations=observations,
-            complexity=complexity,
-        )
-        if self.settings.llm_provider == "disabled":
-            return {
-                "safe_to_answer": bool(observations) and all(
-                    obs.get("status") == "succeeded" for obs in observations
-                ),
-                "missing": "" if observations else "sin datos",
-                "needs_more_tools": False,
-            }
-        messages = verify_answer_messages(question=question, artifact=artifact_preview)
-        try:
-            response = await self.llm_adapter.complete(
-                messages=messages,
-                temperature=0,
-                model=model_for(self.settings, step="verify", complexity=complexity),
-            )
-            parsed = json.loads(response.content.strip())
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-        return {
-            "safe_to_answer": bool(observations),
-            "missing": "" if observations else "sin datos",
-            "needs_more_tools": False,
-        }
+        return observations
