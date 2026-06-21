@@ -235,11 +235,35 @@ class AgentLoop:
         with self.tracer.start_as_current_span("llm.agent.step") as span:
             span.set_attribute("agent.step", step)
             span.set_attribute("agent.complexity", complexity)
-            response = await self.llm_adapter.complete(
-                messages=messages,
-                temperature=0,
-                model=model_for(self.settings, step="agent_step", complexity=complexity),
-            )
+            try:
+                response = await self.llm_adapter.complete(
+                    messages=messages,
+                    temperature=0,
+                    model=model_for(self.settings, step="agent_step", complexity=complexity),
+                )
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                if observations:
+                    return {
+                        "action": "finish",
+                        "tool_name": None,
+                        "arguments": {},
+                        "reason": f"llm_error_after_observation:{type(exc).__name__}",
+                    }
+                if catalog:
+                    return {
+                        "action": "call_tool",
+                        "tool_name": catalog[0]["name"],
+                        "arguments": {},
+                        "reason": f"heuristic_first_tool_after_llm_error:{type(exc).__name__}",
+                    }
+                return {
+                    "action": "finish",
+                    "tool_name": None,
+                    "arguments": {},
+                    "reason": f"llm_error_no_tools:{type(exc).__name__}",
+                }
             span.set_status(Status(StatusCode.OK))
         try:
             parsed = json.loads(response.content.strip())
@@ -279,10 +303,10 @@ class AgentLoop:
             parsed = json.loads(response.content.strip())
             if isinstance(parsed, dict):
                 return parsed
-        except (json.JSONDecodeError, TypeError):
+        except Exception:
             pass
         return {
             "safe_to_answer": bool(observations),
-            "missing": "",
+            "missing": "" if observations else "sin datos",
             "needs_more_tools": False,
         }

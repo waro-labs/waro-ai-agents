@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Literal
 
-from app.llm.base import LLMAdapter, LLMMessage
+from app.llm.base import LLMAdapter, LLMError, LLMMessage
 from app.llm.model_router import Complexity, model_for
 from app.config import Settings
 
@@ -85,6 +85,13 @@ async def classify_complexity(
             "reason": str(parsed.get("reason", "")),
             "estimated_tool_calls": int(parsed.get("estimated_tool_calls", 1) or 1),
             "source": "llm",
+        }
+    except LLMError as exc:
+        return {
+            "complexity": fallback,
+            "reason": f"heuristic_llm_error:{type(exc).__name__}",
+            "estimated_tool_calls": 1 if fallback == "simple" else 3,
+            "source": "heuristic",
         }
     except (json.JSONDecodeError, TypeError, ValueError):
         return {

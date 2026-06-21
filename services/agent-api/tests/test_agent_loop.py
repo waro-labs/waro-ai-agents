@@ -8,7 +8,7 @@ from app.agent.classifier import classify_complexity, heuristic_complexity
 from app.agent.loop import AgentLoop
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
-from app.llm.base import LLMMessage, LLMResponse
+from app.llm.base import LLMError, LLMMessage, LLMResponse
 from app.tools.models import ToolCallResponse
 from app.tools.registry import ToolRegistry, set_tool_registry
 
@@ -47,6 +47,13 @@ class FakeGateway:
         )
 
 
+class FailingLLM:
+    provider = "kimi"
+
+    async def complete(self, *, messages, temperature=0.2, model=None):
+        raise LLMError("Kimi completion request failed.")
+
+
 @pytest.mark.asyncio
 async def test_heuristic_complexity_simple():
     assert heuristic_complexity("dame las ventas de ayer") == "simple"
@@ -61,6 +68,18 @@ async def test_classify_complexity_without_llm():
     )
     assert result["complexity"] == "simple"
     assert result["source"] == "heuristic"
+
+
+@pytest.mark.asyncio
+async def test_classify_complexity_falls_back_when_llm_fails():
+    result = await classify_complexity(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test"),
+        llm_adapter=FailingLLM(),
+        question="dame las ventas de ayer",
+    )
+    assert result["complexity"] == "simple"
+    assert result["source"] == "heuristic"
+    assert result["reason"].startswith("heuristic_llm_error")
 
 
 @pytest.mark.asyncio
@@ -89,6 +108,36 @@ async def test_agent_loop_fast_path_builds_artifact():
         complexity="simple",
     )
     assert artifact["agent_mode"] is True
+    assert artifact["observations"]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_uses_catalog_fallback_when_llm_step_fails():
+    settings = Settings(TOOL_CATALOG_SOURCE="static", LLM_PROVIDER="kimi", KIMI_API_KEY="test")
+    registry = ToolRegistry(settings)
+    set_tool_registry(registry)
+    await registry.refresh(force=True)
+    loop = AgentLoop(
+        settings=settings,
+        gateway=FakeGateway(),
+        registry=registry,
+        llm_adapter=FailingLLM(),
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-agent-fallback",
+        member_id=None,
+        scopes=("orders:read", "financial:read", "menu:read", "customers:read", "analytics:read"),
+    )
+    artifact = await loop.run(
+        question="dime qué productos venden mucho pero tienen bajo margen",
+        context=context,
+        run_id=uuid4(),
+        complexity="complex",
+    )
+    assert artifact["agent_mode"] is True
+    assert artifact["safe_to_answer"] is True
     assert artifact["observations"]
 
 
