@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from app.agent.intent import QuestionIntent, normalize_measure, normalize_text
+from app.agent.queryspec import query_tool_requested
 from app.tools.allowlist import ToolSpec
 from app.tools.response_contract import ResponseContract
 
@@ -136,6 +137,7 @@ def _score_capability(
             rejected_reason=f"missing_scope:{capability.scope}",
         )
 
+    is_query_tool = query_tool_requested(capability)
     if not _entity_compatible(intent, capability):
         return CapabilityMatch(
             capability=capability,
@@ -159,7 +161,7 @@ def _score_capability(
             rejected_reason=f"grain_mismatch:{capability.grain}",
         )
 
-    measure_hits = set(intent.measures).intersection(capability.measures)
+    measure_hits = _measure_hits(intent, capability)
     dimension_hits = set(intent.dimensions).intersection(capability.dimensions)
     operation_hits = set(intent.operations).intersection(capability.operations)
     if measure_hits:
@@ -185,6 +187,8 @@ def _score_capability(
         or _summary_tool_ok(intent, capability)
         or (intent.entity == "business" and bool(operation_hits))
     )
+    if is_query_tool:
+        accepted = accepted and _query_tool_has_analytical_fit(intent, capability, measure_hits)
     rejected_reason = None if accepted else "missing_required_measure"
     return CapabilityMatch(
         capability=capability,
@@ -206,10 +210,13 @@ def required_coverage(intent: QuestionIntent) -> set[str]:
 
 def coverage_for_match(intent: QuestionIntent, match: CapabilityMatch) -> set[str]:
     capability = match.capability
-    coverage: set[str] = set(intent.measures).intersection(capability.measures)
+    coverage: set[str] = _measure_hits(intent, capability)
     if _entity_compatible(intent, capability):
         coverage.add(f"entity:{intent.entity}")
     if _grain_compatible(intent, capability):
+        coverage.add(f"grain:{intent.grain}")
+    if query_tool_requested(capability):
+        coverage.add(f"entity:{intent.entity}")
         coverage.add(f"grain:{intent.grain}")
     if intent.entity == "product" and capability.entity == "product":
         coverage.add("entity:product")
@@ -223,6 +230,8 @@ def coverage_for_match(intent: QuestionIntent, match: CapabilityMatch) -> set[st
 def _entity_compatible(intent: QuestionIntent, capability: ToolCapability) -> bool:
     if intent.entity == "unknown":
         return True
+    if query_tool_requested(capability):
+        return intent.entity in {"sale", "order", "product", "customer", "business"}
     if intent.entity == "business":
         return capability.entity in {
             "sale",
@@ -243,6 +252,8 @@ def _entity_compatible(intent: QuestionIntent, capability: ToolCapability) -> bo
 def _grain_compatible(intent: QuestionIntent, capability: ToolCapability) -> bool:
     if intent.grain == "unknown":
         return True
+    if query_tool_requested(capability):
+        return intent.grain in {"period", "product_period", "customer_period", "business_period"}
     if intent.grain == "business_period":
         return capability.supports_period or capability.grain in {
             "period",
@@ -266,6 +277,51 @@ def _grain_compatible(intent: QuestionIntent, capability: ToolCapability) -> boo
 
 def _summary_tool_ok(intent: QuestionIntent, capability: ToolCapability) -> bool:
     return intent.entity == capability.entity and capability.grain.endswith("_summary")
+
+
+def _measure_hits(intent: QuestionIntent, capability: ToolCapability) -> set[str]:
+    if not query_tool_requested(capability):
+        return set(intent.measures).intersection(capability.measures)
+    capability_measures = set(capability.measures)
+    hits: set[str] = set()
+    for measure in intent.measures:
+        aliases = _query_measure_aliases(measure)
+        if capability_measures.intersection(aliases):
+            hits.add(measure)
+    return hits
+
+
+def _query_tool_has_analytical_fit(
+    intent: QuestionIntent,
+    capability: ToolCapability,
+    measure_hits: set[str],
+) -> bool:
+    if not measure_hits:
+        return False
+    if intent.entity == "business":
+        return len(measure_hits) >= 2 or bool(set(intent.operations).intersection({"diagnose", "compare"}))
+    if intent.requires_cross_tool:
+        return len(measure_hits) >= 2
+    if set(intent.operations).intersection({"compare", "diagnose"}):
+        return bool(set(intent.dimensions).intersection(capability.dimensions)) or len(measure_hits) >= 2
+    if intent.entity in {"product", "customer"} and intent.grain in {"product_period", "customer_period"}:
+        return bool(measure_hits)
+    return bool(set(intent.operations).intersection({"rank", "group", "sort", "filter"}))
+
+
+def _query_measure_aliases(measure: str) -> set[str]:
+    normalized = measure.replace("-", "_")
+    aliases = {
+        "margin": {"margin", "profit_margin_pct", "profit_margin_real_pct", "profit_margin_operativo_pct"},
+        "cost": {"cost", "profit_per_unit"},
+        "profit": {"total_profit", "profit"},
+        "total_sales": {"total_sales", "revenue"},
+        "total_revenue": {"total_revenue", "revenue"},
+        "total_orders": {"total_orders", "order_count", "orders_count"},
+        "quantity": {"quantity", "quantity_sold"},
+        "total_units_sold": {"total_units_sold", "quantity_sold"},
+    }
+    return aliases.get(normalized, {normalized})
 
 
 def _list(value: Any) -> list[Any]:

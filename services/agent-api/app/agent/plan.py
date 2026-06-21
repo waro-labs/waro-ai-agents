@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from app.agent.capabilities import CapabilityMatch, coverage_for_match, required_coverage
 from app.agent.intent import QuestionIntent
 from app.agent.profiles import profile_for_intent
+from app.agent.queryspec import build_queryspec_for_intent, query_tool_requested
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,9 @@ def _select_matches(intent: QuestionIntent, accepted: list[CapabilityMatch]) -> 
     profile = profile_for_intent(intent)
     if profile is not None and profile.tool_priorities:
         return _select_profile_matches(accepted, profile.tool_priorities, max_steps=profile.max_steps)
+    query_match = _complete_query_match(intent, accepted)
+    if query_match is not None:
+        return [query_match]
     selected: list[CapabilityMatch] = []
     coverage: set[str] = set()
     required = _effective_required_coverage(intent)
@@ -131,6 +136,9 @@ def _arguments_for(intent: QuestionIntent, capability: Any) -> dict[str, Any]:
     declares familiar arguments such as date-from, limit, sort-by, sort-field or
     group-by, it can participate in planning through its contract.
     """
+    if query_tool_requested(capability):
+        spec = build_queryspec_for_intent(intent, capability)
+        return {"spec": json.dumps(spec, separators=(",", ":"))}
     args: dict[str, Any] = {}
     properties = _argument_properties(capability.arguments_schema)
     if intent.time_range.date_from and capability.supports_period and "date-from" in properties:
@@ -168,6 +176,20 @@ def _effective_required_coverage(intent: QuestionIntent) -> set[str]:
     if intent.entity == "business":
         return set()
     return required
+
+
+def _complete_query_match(intent: QuestionIntent, accepted: list[CapabilityMatch]) -> CapabilityMatch | None:
+    required = _effective_required_coverage(intent)
+    query_matches = [match for match in accepted if query_tool_requested(match.capability)]
+    for match in query_matches:
+        coverage = coverage_for_match(intent, match)
+        if required.issubset(coverage) and (
+            intent.requires_cross_tool
+            or set(intent.operations).intersection({"compare", "diagnose"})
+            or len(set(intent.measures).intersection(coverage)) >= 2
+        ):
+            return match
+    return None
 
 
 def _period_days(intent: QuestionIntent) -> int:

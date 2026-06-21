@@ -10,6 +10,12 @@ from app.agent.capabilities import capability_from_spec, match_tools, search_cap
 from app.agent.evidence import build_evidence_artifact
 from app.agent.intent import parse_question_intent
 from app.agent.plan import build_tool_plan
+from app.agent.queryspec import (
+    QuerySpecValidationError,
+    is_query_tool,
+    query_trace_attributes_from_args,
+    validate_queryspec_payload,
+)
 from app.agent.strategy import choose_answer_strategy
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
@@ -100,6 +106,7 @@ class AgentLoop:
                     plan_steps=plan.steps,
                     context=context,
                     run_id=run_id,
+                    span=span,
                 )
             artifact = build_evidence_artifact(
                 question=question,
@@ -133,6 +140,7 @@ class AgentLoop:
         plan_steps,
         context: InternalRequestContext,
         run_id: UUID,
+        span: Any | None = None,
     ) -> list[dict[str, Any]]:
         observations: list[dict[str, Any]] = []
         for step in plan_steps:
@@ -148,6 +156,39 @@ class AgentLoop:
                     }
                 )
                 continue
+            if is_query_tool(step.tool_name):
+                try:
+                    validate_queryspec_payload(step.arguments.get("spec"))
+                except QuerySpecValidationError as exc:
+                    if span is not None:
+                        for key, value in query_trace_attributes_from_args(
+                            step.arguments,
+                            valid=False,
+                            rejected_reason=exc.reason,
+                        ).items():
+                            span.set_attribute(key, value)
+                    observations.append(
+                        {
+                            "tool_name": step.tool_name,
+                            "status": "failed",
+                            "arguments": step.arguments,
+                            "fields": list(step.fields),
+                            "purpose": step.purpose,
+                            "expected_evidence": list(step.expected_evidence),
+                            "error": {
+                                "message": "invalid_queryspec",
+                                "kind": "validation",
+                                "rejected_reason": exc.reason,
+                            },
+                        }
+                    )
+                    continue
+                if span is not None:
+                    for key, value in query_trace_attributes_from_args(
+                        step.arguments,
+                        valid=True,
+                    ).items():
+                        span.set_attribute(key, value)
             try:
                 args = await coerce_args_async(spec, step.arguments)
             except Exception as exc:

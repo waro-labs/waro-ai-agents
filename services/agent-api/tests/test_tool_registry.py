@@ -105,3 +105,59 @@ async def test_tool_registry_merges_dynamic_cli_tool(monkeypatch):
     assert snapshot.source == "cli"
     assert "waro.inventory.stock" in snapshot.tools
     assert "waro.sales.metrics" in snapshot.tools
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_exposes_dynamic_queries_run(monkeypatch):
+    payload = {
+        "schema_version": AGENT_SCHEMA_V2,
+        "tools": [
+            {
+                "name": "waro.queries.run",
+                "command": ["queries", "run"],
+                "scope": "analytics:read",
+                "domain": "queries",
+                "description": "Run a safe QuerySpec",
+                "capabilities": {
+                    "entity": "query_row",
+                    "grain": "dynamic_dataset_row",
+                    "measures": ["quantity_sold", "revenue", "total_spent", "avg_ticket", "profit_margin_pct"],
+                    "dimensions": ["product", "customer", "category", "day"],
+                    "supported_operations": ["filter", "aggregate", "group", "rank", "sort", "limit", "compare"],
+                    "supports_period": True,
+                    "default_rank": ["revenue", "quantity_sold", "total_spent"],
+                },
+                "arguments": {
+                    "type": "object",
+                    "properties": {
+                        "spec": {"type": "string"},
+                        "dry-run": {"type": "boolean"},
+                    },
+                    "required": ["spec"],
+                },
+                "response": {
+                    "shape": "rows",
+                    "row_path": "rows",
+                    "fields": ["rows", "meta"],
+                    "default_fields": ["rows", "meta"],
+                    "top_level_keys": ["rows", "meta"],
+                },
+            }
+        ],
+    }
+
+    async def fake_load(self):
+        return payload
+
+    settings = Settings(TOOL_CATALOG_SOURCE="cli")
+    registry = ToolRegistry(settings)
+    monkeypatch.setattr(ToolRegistry, "_load_cli_schema", fake_load)
+    snapshot = await registry.refresh(force=True)
+    queries = snapshot.tools["waro.queries.run"]
+    metadata = await registry.catalog_metadata()
+    query_metadata = next(item for item in metadata if item["name"] == "waro.queries.run")
+
+    assert queries.command == ("queries", "run")
+    assert queries.scope == "analytics:read"
+    assert query_metadata["arguments_schema"]["properties"]["spec"]["type"] == "string"
+    assert "profit_margin_pct" in queries.capabilities["measures"]

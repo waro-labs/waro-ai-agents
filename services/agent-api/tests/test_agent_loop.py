@@ -9,7 +9,7 @@ from app.agent.capabilities import ToolCapability, capability_from_spec, match_t
 from app.agent.evidence import build_evidence_artifact, deterministic_evidence_summary
 from app.agent.intent import coerce_intent, heuristic_intent, parse_question_intent, resolve_contextual_intent
 from app.agent.loop import AgentLoop
-from app.agent.plan import build_tool_plan
+from app.agent.plan import ToolPlanStep, build_tool_plan
 from app.agent.profiles import profile_for_intent, rows_for_group
 from app.agent.strategy import heuristic_answer_strategy
 from app.config import Settings
@@ -81,6 +81,29 @@ class FakeGateway:
             result=result,
             result_summary="metrics ok",
         )
+
+
+class RecordingGateway:
+    def __init__(self):
+        self.calls = []
+
+    async def call(self, *, request, context):
+        self.calls.append(request)
+        return ToolCallResponse(
+            tool_call_id=uuid4(),
+            tool_name=request.tool_name,
+            status="succeeded",
+            result={"rows": [{"product": "Burger", "revenue": 1000}]},
+            result_summary="query ok",
+        )
+
+
+class RecordingSpan:
+    def __init__(self):
+        self.attributes = {}
+
+    def set_attribute(self, key, value):
+        self.attributes[key] = value
 
 
 class FailingLLM:
@@ -326,6 +349,66 @@ def _dynamic_capability(
     )
 
 
+def _queries_capability() -> ToolCapability:
+    return _dynamic_capability(
+        tool_name="waro.queries.run",
+        entity="query_row",
+        grain="dynamic_dataset_row",
+        measures=(
+            "quantity_sold",
+            "revenue",
+            "order_count",
+            "total_spent",
+            "avg_ticket",
+            "profit_margin_pct",
+            "total_profit",
+        ),
+        dimensions=("product", "customer", "category", "day"),
+        operations=("filter", "aggregate", "group", "rank", "sort", "limit", "compare"),
+        default_fields=("rows", "meta"),
+        arguments_schema={
+            "properties": {
+                "spec": {"type": "string"},
+                "dry-run": {"type": "boolean"},
+            },
+            "required": ["spec"],
+        },
+        planning_hints={"default_rank": ["revenue", "quantity_sold", "total_spent"]},
+    )
+
+
+def _queries_schema_payload():
+    return {
+        "schema_version": "waro.agent.v2",
+        "tools": [
+            {
+                "name": "waro.queries.run",
+                "command": ["queries", "run"],
+                "scope": "analytics:read",
+                "domain": "queries",
+                "description": "Run a safe QuerySpec",
+                "capabilities": _queries_capability().planning_hints
+                | {
+                    "entity": "query_row",
+                    "grain": "dynamic_dataset_row",
+                    "measures": list(_queries_capability().measures),
+                    "dimensions": list(_queries_capability().dimensions),
+                    "supported_operations": list(_queries_capability().operations),
+                    "supports_period": True,
+                },
+                "arguments": _queries_capability().arguments_schema,
+                "response": {
+                    "shape": "rows",
+                    "row_path": "rows",
+                    "fields": ["rows", "meta"],
+                    "default_fields": ["rows", "meta"],
+                    "top_level_keys": ["rows", "meta"],
+                },
+            }
+        ],
+    }
+
+
 def test_capability_matcher_routes_waros_question_to_waros_tool():
     intent = heuristic_intent("¿Qué clientes han generado más WAROS este mes?")
     waros = _dynamic_capability(
@@ -524,6 +607,58 @@ def test_plan_builds_arguments_from_schema_for_unknown_compatible_tool():
     assert plan.steps[0].arguments["limit"] == 20
     assert plan.steps[0].arguments["sort-by"] == "quantity"
     assert "date-from" in plan.steps[0].arguments
+
+
+def test_plan_prefers_queries_for_product_sales_with_margin():
+    intent = heuristic_intent("dime los productos mas vendidos del año y su margen")
+    matches = match_tools(
+        intent,
+        [capability_from_spec(TOOL_SPECS["waro.financial.products"]), _queries_capability()],
+        scopes=("financial:read", "analytics:read"),
+    )
+    plan = build_tool_plan(intent, matches)
+    spec = json.loads(plan.steps[0].arguments["spec"])
+
+    assert plan.valid is True
+    assert [step.tool_name for step in plan.steps] == ["waro.queries.run"]
+    assert spec["dataset"] == "product_profitability"
+    assert "quantity_sold" in spec["measures"]
+    assert "profit_margin_pct" in spec["measures"]
+    assert "product" in spec["dimensions"]
+    assert "sql" not in json.dumps(spec).lower()
+
+
+def test_plan_builds_customer_queries_for_comparison():
+    intent = heuristic_intent("Compara clientes frecuentes contra clientes con mayor valor comprado este mes.")
+    matches = match_tools(
+        intent,
+        [capability_from_spec(TOOL_SPECS["waro.customers.list"]), _queries_capability()],
+        scopes=("customers:read", "analytics:read"),
+    )
+    plan = build_tool_plan(intent, matches)
+    spec = json.loads(plan.steps[0].arguments["spec"])
+
+    assert plan.valid is True
+    assert [step.tool_name for step in plan.steps] == ["waro.queries.run"]
+    assert spec["dataset"] == "customers"
+    assert {"order_count", "total_spent"}.issubset(set(spec["measures"]))
+    assert spec["order_by"][0]["field"] in {"order_count", "total_spent"}
+
+
+def test_plan_uses_queries_for_contextual_product_margin_follow_up():
+    intent = resolve_contextual_intent(
+        heuristic_intent("que margen tienen"),
+        question="que margen tienen",
+        conversation_state={"source": "artifact", "active_entity": "product", "active_grain": "product_period"},
+    )
+    matches = match_tools(intent, [_queries_capability()], scopes=("analytics:read",))
+    plan = build_tool_plan(intent, matches)
+    spec = json.loads(plan.steps[0].arguments["spec"])
+
+    assert plan.valid is True
+    assert plan.steps[0].tool_name == "waro.queries.run"
+    assert spec["dataset"] == "product_profitability"
+    assert "profit_margin_pct" in spec["measures"]
 
 
 def test_plan_validator_accepts_customer_frequency_vs_spend_without_revenue():
@@ -867,6 +1002,62 @@ async def test_agent_loop_uses_catalog_fallback_when_llm_step_fails():
     assert artifact["safe_to_answer"] is True
     assert artifact["observations"]
     assert "waro.sales.list" not in {obs["tool_name"] for obs in artifact["observations"]}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_blocks_invalid_queryspec_before_gateway(monkeypatch):
+    async def fake_load(self):
+        return _queries_schema_payload()
+
+    settings = Settings(TOOL_CATALOG_SOURCE="cli", LLM_PROVIDER="disabled")
+    registry = ToolRegistry(settings)
+    monkeypatch.setattr(ToolRegistry, "_load_cli_schema", fake_load)
+    await registry.refresh(force=True)
+    gateway = RecordingGateway()
+    loop = AgentLoop(
+        settings=settings,
+        gateway=gateway,
+        registry=registry,
+        llm_adapter=FakeLLM(),
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-invalid-query",
+        member_id=None,
+        scopes=("analytics:read",),
+    )
+    span = RecordingSpan()
+    observations = await loop._execute_plan(
+        plan_steps=(
+            ToolPlanStep(
+                tool_name="waro.queries.run",
+                arguments={
+                    "spec": json.dumps(
+                        {
+                            "dataset": "raw_sql",
+                            "measures": ["revenue"],
+                            "dimensions": ["product"],
+                            "order_by": [{"field": "revenue", "direction": "desc"}],
+                            "limit": 10,
+                        }
+                    )
+                },
+                fields=("rows", "meta"),
+                purpose="test invalid query",
+                expected_evidence=("revenue",),
+            ),
+        ),
+        context=context,
+        run_id=uuid4(),
+        span=span,
+    )
+
+    assert gateway.calls == []
+    assert observations[0]["status"] == "failed"
+    assert observations[0]["error"]["rejected_reason"] == "invalid_dataset:raw_sql"
+    assert span.attributes["waro.queries.valid"] is False
+    assert span.attributes["waro.queries.rejected_reason"] == "invalid_dataset:raw_sql"
 
 
 @pytest.mark.asyncio
