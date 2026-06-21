@@ -127,7 +127,10 @@ def heuristic_intent(question: str) -> QuestionIntent:
         grain = "order"
 
     if re.search(r"\b(vendi|vendio|ventas?|ingresos?|factur|compraron|comprado)\b", normalized):
-        measures.append("total_sales" if entity in {"sale", "order"} else "revenue")
+        if entity == "customer":
+            measures.append("total_spent")
+        else:
+            measures.append("total_sales" if entity in {"sale", "order"} else "revenue")
     if re.search(r"\b(ticket promedio|promedio|avg ticket)\b", normalized):
         measures.append("avg_ticket")
     if re.search(r"\b(frecuentes?|frecuencia|ordenes?|pedidos?)\b", normalized):
@@ -176,7 +179,7 @@ def heuristic_intent(question: str) -> QuestionIntent:
     return QuestionIntent(
         entity=entity,
         grain=grain,
-        measures=tuple(_dedupe(measures)),
+        measures=tuple(normalize_measures_for_entity(entity, _dedupe(measures))),
         dimensions=tuple(_dedupe(dimensions)),
         operations=tuple(_dedupe(operations)),
         time_range=time_range,
@@ -215,7 +218,7 @@ def coerce_intent(payload: dict[str, Any], *, fallback: QuestionIntent, source: 
         timezone=str(time_payload.get("timezone") or fallback.time_range.timezone),
         label=str(time_payload.get("label") or fallback.time_range.label),
     )
-    measures = tuple(_dedupe([*fallback.measures, *_string_list(payload.get("measures"))]))
+    measures = tuple(normalize_measures_for_entity(entity, _dedupe([*fallback.measures, *_string_list(payload.get("measures"))])))
     dimensions = tuple(_dedupe([*fallback.dimensions, *_string_list(payload.get("dimensions"))]))
     operations = tuple(
         item for item in _dedupe([*fallback.operations, *_string_list(payload.get("operations"))]) if item in KNOWN_OPERATIONS
@@ -280,3 +283,16 @@ def normalize_measure(value: str) -> str:
         "spent": "total_spent",
     }
     return aliases.get(normalized, normalized)
+
+
+def normalize_measures_for_entity(entity: str, measures: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for measure in measures:
+        value = measure
+        if entity == "customer" and value in {"revenue", "total_sales"}:
+            value = "total_spent"
+        if entity == "product" and value == "total_sales":
+            value = "revenue"
+        if value not in normalized:
+            normalized.append(value)
+    return normalized

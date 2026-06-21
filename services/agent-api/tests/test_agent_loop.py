@@ -6,6 +6,7 @@ import pytest
 
 from app.agent.classifier import classify_complexity, heuristic_complexity
 from app.agent.capabilities import capability_from_spec, match_tools
+from app.agent.evidence import build_evidence_artifact, deterministic_evidence_summary
 from app.agent.intent import heuristic_intent
 from app.agent.loop import AgentLoop
 from app.agent.plan import build_tool_plan
@@ -168,6 +169,56 @@ def test_plan_validator_accepts_financial_and_food_cost_for_product_margin():
         "waro.financial.products",
         "waro.analytics.food_cost",
     }
+
+
+def test_plan_validator_accepts_customer_frequency_vs_spend_without_revenue():
+    intent = heuristic_intent("Compara clientes frecuentes contra clientes con mayor valor comprado este mes.")
+    assert "revenue" not in intent.measures
+    assert {"order_count", "total_spent"}.issubset(set(intent.measures))
+    capabilities = [
+        capability_from_spec(TOOL_SPECS["waro.customers.metrics"]),
+        capability_from_spec(TOOL_SPECS["waro.customers.list"]),
+    ]
+    matches = match_tools(intent, capabilities, scopes=("customers:read",))
+    plan = build_tool_plan(intent, matches)
+    assert plan.valid is True
+    assert "revenue" not in plan.missing_coverage
+
+
+def test_evidence_merges_product_sales_and_margin_rows():
+    intent = heuristic_intent("Dime qué productos vendieron mucho este mes pero tienen bajo margen.")
+    plan = build_tool_plan(
+        intent,
+        match_tools(
+            intent,
+            [
+                capability_from_spec(TOOL_SPECS["waro.financial.products"]),
+                capability_from_spec(TOOL_SPECS["waro.analytics.food_cost"]),
+            ],
+            scopes=("financial:read", "analytics:read"),
+        ),
+    )
+    artifact = build_evidence_artifact(
+        question="Dime qué productos vendieron mucho este mes pero tienen bajo margen.",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.financial.products",
+                "status": "succeeded",
+                "result": {"products": [{"name": "Burger", "quantity": 50, "revenue": 1000000}]},
+            },
+            {
+                "tool_name": "waro.analytics.food_cost",
+                "status": "succeeded",
+                "result": {"data": {"products": [{"name": "Burger", "profit_margin_pct": 12}]}},
+            },
+        ],
+    )
+    summary = deterministic_evidence_summary(artifact)
+    assert "50 unidades" in summary
+    assert "$1.000.000 vendido" in summary
+    assert "margen 12%" in summary
 
 
 def test_capability_uses_schema_default_fields_over_legacy_defaults():

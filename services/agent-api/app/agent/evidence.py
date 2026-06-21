@@ -106,7 +106,10 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
     if entity == "customer":
         if not rows:
             return "No encontre clientes suficientes para responder con ranking."
-        label = "Clientes"
+        if "compare" in intent.get("operations", []):
+            label = "Comparacion de clientes frecuentes contra mayor valor comprado"
+        else:
+            label = "Clientes"
         lines = [f"{label} para {_period_label(period)}:"]
         for index, row in enumerate(rows[:20], start=1):
             name = row.get("name") or row.get("customer_name") or row.get("customer_id") or "Cliente"
@@ -199,6 +202,7 @@ def _ranked_rows(intent: QuestionIntent, tables: list[dict[str, Any]]) -> list[d
             if isinstance(row, dict):
                 rows.append(row)
     if intent.entity == "product":
+        rows = _merge_product_rows(rows)
         return sorted(
             rows,
             key=lambda row: (
@@ -208,8 +212,48 @@ def _ranked_rows(intent: QuestionIntent, tables: list[dict[str, Any]]) -> list[d
         )
     if intent.entity == "customer":
         key = "order_count" if "order_count" in intent.measures else "total_spent"
-        return sorted(rows, key=lambda row: -(float(row.get(key) or 0)))
+        rows = [
+            row
+            for row in rows
+            if _number(row.get("order_count")) > 0 or _number(row.get("total_spent")) > 0
+        ]
+        if "compare" in intent.operations and {"order_count", "total_spent"}.issubset(set(intent.measures)):
+            return sorted(
+                rows,
+                key=lambda row: (-_number(row.get("order_count")), -_number(row.get("total_spent"))),
+            )
+        return sorted(rows, key=lambda row: -_number(row.get(key)))
     return rows
+
+
+def _merge_product_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("id") or row.get("product_id") or row.get("name") or row.get("product_name") or "").strip().lower()
+        if not key:
+            continue
+        current = merged.setdefault(key, {})
+        for source, target in (
+            ("id", "id"),
+            ("product_id", "id"),
+            ("name", "name"),
+            ("product_name", "name"),
+            ("quantity", "quantity"),
+            ("quantity_sold", "quantity"),
+            ("total_units_sold", "quantity"),
+            ("revenue", "revenue"),
+            ("total_revenue", "revenue"),
+            ("margin", "margin"),
+            ("margin_pct", "margin"),
+            ("profit_margin_pct", "margin"),
+            ("profit_margin_real_pct", "margin"),
+            ("cost", "cost"),
+            ("estimated_cost", "cost"),
+        ):
+            value = row.get(source)
+            if value is not None and current.get(target) is None:
+                current[target] = value
+    return list(merged.values())
 
 
 def _evidence(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -245,6 +289,13 @@ def _fmt_money(value: Any) -> str:
         return "$" + f"{float(value):,.0f}".replace(",", ".")
     except (TypeError, ValueError):
         return str(value)
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _period_prefix(label: str | None) -> str:
