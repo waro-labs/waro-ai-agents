@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
 
@@ -168,6 +168,7 @@ class ToolSpec:
     description: str
     tags: tuple[str, ...] = ()
     examples: tuple[str, ...] = ()
+    capabilities: Mapping[str, Any] = field(default_factory=dict)
 
 
 TOOL_SPECS: Mapping[str, ToolSpec] = {
@@ -184,6 +185,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="Analyze product food cost, margin, revenue, and cost by period.",
         tags=("food cost", "margin", "profitability", "products"),
         examples=("productos con peor margen", "food cost del mes"),
+        capabilities={
+            "entity": "product",
+            "grain": "product_period",
+            "measures": ["food_cost_pct", "margin_pct", "revenue", "cost"],
+            "dimensions": ["product_id", "product_name"],
+            "supported_operations": ["filter", "rank", "sort", "limit"],
+            "default_rank": ["food_cost_pct"],
+            "active_condition": ["revenue", "cost"],
+            "supports_period": True,
+        },
     ),
     "waro.menu.products": ToolSpec(
         name="waro.menu.products",
@@ -207,6 +218,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="List menu products and product attributes, including price and availability.",
         tags=("menu", "products", "availability", "price"),
         examples=("productos disponibles", "lista de productos del menu"),
+        capabilities={
+            "entity": "product",
+            "grain": "product",
+            "measures": ["price", "calculatedCost", "perceivedCost", "preparationTime"],
+            "dimensions": ["id", "name", "category", "isAvailable"],
+            "supported_operations": ["filter", "rank", "sort", "limit"],
+            "default_rank": ["name"],
+            "active_condition": ["isAvailable"],
+            "supports_period": False,
+        },
     ),
     "waro.menu.recipes": ToolSpec(
         name="waro.menu.recipes",
@@ -221,6 +242,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="List menu recipes and recipe cost/activity metadata.",
         tags=("menu", "recipes", "ingredients", "cost"),
         examples=("recetas activas", "costos de recetas"),
+        capabilities={
+            "entity": "recipe",
+            "grain": "recipe",
+            "measures": [],
+            "dimensions": ["id", "name", "isActive", "ingredients"],
+            "supported_operations": ["filter", "limit"],
+            "default_rank": ["name"],
+            "active_condition": ["isActive"],
+            "supports_period": False,
+        },
     ),
     "waro.menu.modifiers": ToolSpec(
         name="waro.menu.modifiers",
@@ -245,6 +276,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="Analyze menu portfolio performance and product classifications.",
         tags=("analytics", "menu", "portfolio", "products", "performance"),
         examples=("analisis del menu", "productos estrella y bajo rendimiento"),
+        capabilities={
+            "entity": "product",
+            "grain": "product_period",
+            "measures": ["sales", "revenue", "margin", "performance"],
+            "dimensions": ["product", "category", "classification"],
+            "supported_operations": ["filter", "rank", "sort", "limit", "group"],
+            "default_rank": ["revenue"],
+            "active_condition": ["sales", "revenue"],
+            "supports_period": True,
+        },
     ),
     "waro.analytics.alerts": ToolSpec(
         name="waro.analytics.alerts",
@@ -301,6 +342,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="List customers ranked by spend, orders, recency, or average ticket.",
         tags=("customers", "clients", "spend", "orders", "recency"),
         examples=("mejores clientes", "clientes por gasto"),
+        capabilities={
+            "entity": "customer",
+            "grain": "customer_period",
+            "measures": ["order_count", "total_spent", "avg_ticket", "waros_balance"],
+            "dimensions": ["customer_id", "name", "phone", "email", "last_order_date"],
+            "supported_operations": ["filter", "rank", "sort", "limit"],
+            "default_rank": ["total_spent", "order_count"],
+            "active_condition": ["order_count", "total_spent"],
+            "supports_period": True,
+        },
     ),
     "waro.customers.metrics": ToolSpec(
         name="waro.customers.metrics",
@@ -313,6 +364,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="Compute customer metrics such as activity, retention, and grouped trends.",
         tags=("customers", "metrics", "retention", "frequency", "activity"),
         examples=("metricas de clientes", "retencion de clientes"),
+        capabilities={
+            "entity": "customer",
+            "grain": "customer_period_summary",
+            "measures": ["activity", "retention", "frequency", "top_customers"],
+            "dimensions": ["date", "weekday", "month"],
+            "supported_operations": ["aggregate", "group", "rank", "limit"],
+            "default_rank": ["order_count"],
+            "active_condition": ["top_customers"],
+            "supports_period": True,
+        },
     ),
     "waro.sales.list": ToolSpec(
         name="waro.sales.list",
@@ -337,6 +398,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="List sales orders with status, payment method, customer, date, and total.",
         tags=("sales", "orders", "tickets", "payment"),
         examples=("ordenes de ayer", "ventas canceladas"),
+        capabilities={
+            "entity": "order",
+            "grain": "order",
+            "measures": ["totalAmount", "itemsCount"],
+            "dimensions": ["id", "status", "orderDate", "paymentMethod", "customer"],
+            "supported_operations": ["filter", "rank", "sort", "limit"],
+            "default_rank": ["orderDate"],
+            "active_condition": ["totalAmount"],
+            "supports_period": True,
+        },
     ),
     "waro.sales.metrics": ToolSpec(
         name="waro.sales.metrics",
@@ -362,6 +433,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="Compute sales metrics such as total sales, order count, average ticket, and grouped series.",
         tags=("sales", "metrics", "revenue", "orders", "ticket", "series"),
         examples=("ventas de ayer", "ventas por hora", "ventas del mes"),
+        capabilities={
+            "entity": "sale",
+            "grain": "period_or_group",
+            "measures": ["totalSales", "totalOrders", "orderCount", "avgTicket"],
+            "dimensions": ["date", "weekday", "hour", "product", "payment", "ticket"],
+            "supported_operations": ["aggregate", "group", "rank", "sort", "limit", "compare"],
+            "default_rank": ["totalSales"],
+            "active_condition": ["totalSales", "totalOrders"],
+            "supports_period": True,
+        },
     ),
     "waro.sales.detail": ToolSpec(
         name="waro.sales.detail",
@@ -388,6 +469,16 @@ TOOL_SPECS: Mapping[str, ToolSpec] = {
         description="Rank products by margin, revenue, cost, or quantity over a period.",
         tags=("financial", "products", "margin", "revenue", "cost", "quantity"),
         examples=("productos con peor margen", "productos por ingresos"),
+        capabilities={
+            "entity": "product",
+            "grain": "product_period",
+            "measures": ["margin", "revenue", "cost", "quantity", "profit"],
+            "dimensions": ["id", "name", "category", "classification"],
+            "supported_operations": ["filter", "rank", "sort", "limit"],
+            "default_rank": ["quantity"],
+            "active_condition": ["quantity", "revenue", "profit"],
+            "supports_period": True,
+        },
     ),
 }
 

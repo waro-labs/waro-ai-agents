@@ -120,6 +120,10 @@ def test_customer_tools_default_to_real_cli_fields():
 def test_tool_catalog_exposes_auditable_tool_metadata():
     catalog = tool_catalog()
     sales_metrics = next(tool for tool in catalog if tool["name"] == "waro.sales.metrics")
+    customers_list = next(tool for tool in catalog if tool["name"] == "waro.customers.list")
+    financial_products = next(
+        tool for tool in catalog if tool["name"] == "waro.financial.products"
+    )
     tool_names = {tool["name"] for tool in catalog}
 
     assert sales_metrics["domain"] == "sales"
@@ -127,6 +131,15 @@ def test_tool_catalog_exposes_auditable_tool_metadata():
     assert "description" in sales_metrics
     assert "arguments_schema" in sales_metrics
     assert "data" in sales_metrics["default_fields"]
+    assert sales_metrics["capabilities"]["entity"] == "sale"
+    assert "aggregate" in sales_metrics["capabilities"]["supported_operations"]
+    assert customers_list["capabilities"]["entity"] == "customer"
+    assert customers_list["capabilities"]["default_rank"] == [
+        "total_spent",
+        "order_count",
+    ]
+    assert financial_products["capabilities"]["entity"] == "product"
+    assert "quantity" in financial_products["capabilities"]["measures"]
     assert "waro.analytics.menu" in tool_names
     assert "waro.customers.metrics" in tool_names
 
@@ -142,6 +155,15 @@ def test_candidate_tools_rank_relevant_scoped_tools():
         "waro.sales.metrics",
         "waro.financial.products",
     ]
+
+
+def test_candidate_tools_use_capability_terms_for_discovery():
+    candidates = candidate_tools(
+        "consulta waros_balance",
+        scopes=("customers:read",),
+    )
+
+    assert candidates[0].name == "waro.customers.list"
 
 
 def test_tool_discovery_records_relevant_tools_rejected_by_scope():

@@ -23,6 +23,7 @@ def tool_metadata(spec: ToolSpec) -> dict[str, Any]:
         "examples": list(spec.examples),
         "default_fields": list(spec.default_fields),
         "allowed_fields": sorted(spec.allowed_fields),
+        "capabilities": dict(spec.capabilities),
         "arguments_schema": schema,
     }
 
@@ -135,7 +136,16 @@ def _score_tool(
     if preferred_domain and spec.domain == preferred_domain:
         score += 4
         reasons.append(f"preferred_domain:{preferred_domain}")
-    haystack = " ".join((spec.name, spec.description, *spec.tags, *spec.examples))
+    capability_terms = _capability_terms(spec.capabilities)
+    haystack = " ".join(
+        (
+            spec.name,
+            spec.description,
+            *spec.tags,
+            *spec.examples,
+            *capability_terms,
+        )
+    )
     matched_tokens: set[str] = set()
     for token in re.findall(r"[a-z0-9_]+", normalize_query(haystack)):
         if (
@@ -196,3 +206,17 @@ def _score_tool(
         score += 6
         reasons.append("customer_signal")
     return score, reasons
+
+
+def _capability_terms(value: Any) -> list[str]:
+    terms: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            terms.append(str(key))
+            terms.extend(_capability_terms(item))
+    elif isinstance(value, list | tuple | set | frozenset):
+        for item in value:
+            terms.extend(_capability_terms(item))
+    elif value is not None:
+        terms.append(str(value))
+    return terms

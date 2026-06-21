@@ -50,6 +50,7 @@ def sales_planner_messages(
                     "domain": tool.get("domain"),
                     "description": tool.get("description"),
                     "default_fields": tool.get("default_fields"),
+                    "capabilities": tool.get("capabilities"),
                     "arguments_schema": tool.get("arguments_schema"),
                 }
                 for tool in tool_catalog
@@ -102,6 +103,10 @@ def sales_planner_messages(
                 "Si el usuario pide promedio por dia, tendencia diaria, dia a dia o ultimos N dias, "
                 "usa group_by='date'. Para preguntas concretas como 'ventas de ayer', "
                 "answer_style debe ser direct_metric. Para analisis financiero, usa financial_analysis. "
+                "Elige tools y operaciones leyendo available_tools.capabilities: entity, grain, "
+                "measures, dimensions, supported_operations, default_rank, active_condition y "
+                "supports_period. No dependas solo del nombre de la tool; si aparece una tool nueva "
+                "con capabilities relevantes, puedes seleccionarla. "
                 "Si pide productos mas vendidos, productos por cantidad o ranking de productos, "
                 "request_kind='product_ranking', dimensions incluye 'product', sort_field='quantity' "
                 "y tools debe incluir waro.financial.products. Si pide clientes frecuentes, mejores "
