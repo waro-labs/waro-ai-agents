@@ -838,6 +838,89 @@ async def test_sales_workflow_plans_auxiliary_financial_tool_for_product_context
 
 
 @pytest.mark.asyncio
+async def test_sales_workflow_answers_high_volume_low_margin_products_with_cli_fields():
+    connection = FakeConnection()
+
+    class ProductGateway(FakeGateway):
+        async def call(self, *, request, context):
+            self.calls.append(request)
+            if request.tool_name == "waro.financial.products":
+                return ToolCallResponse(
+                    tool_call_id=uuid4(),
+                    tool_name=request.tool_name,
+                    status="succeeded",
+                    result={
+                        "metrics": {"total_profit": 520000, "total_revenue": 2500000},
+                        "products": [
+                            {
+                                "id": "p1",
+                                "name": "Burger",
+                                "margin": 0.18,
+                                "totalRevenue": 900000,
+                                "sales": 95,
+                                "profit": 162000,
+                            },
+                            {
+                                "id": "p2",
+                                "name": "Pasta",
+                                "margin": 0.42,
+                                "totalRevenue": 880000,
+                                "sales": 96,
+                                "profit": 369600,
+                            },
+                            {
+                                "id": "p3",
+                                "name": "Sopa",
+                                "margin": 0.12,
+                                "totalRevenue": 120000,
+                                "sales": 8,
+                                "profit": 14400,
+                            },
+                        ],
+                        "success": True,
+                    },
+                    result_summary="Returned product financial rows.",
+                )
+            return await super().call(request=request, context=context)
+
+    gateway = ProductGateway()
+
+    @asynccontextmanager
+    async def connection_factory():
+        yield connection
+
+    workflow = SalesWorkflow(
+        settings=Settings(),
+        gateway=gateway,
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-sales-low-margin-products",
+        member_id=None,
+        scopes=("orders:read", "financial:read"),
+    )
+
+    response = await workflow.run(
+        request=SalesQuestionRequest(
+            question="dime qué productos venden mucho pero tienen bajo margen",
+            date_from="2026-06-01",
+            date_to="2026-06-20",
+        ),
+        context=context,
+    )
+
+    assert response.status == "completed"
+    assert "Productos que venden mucho pero tienen bajo margen" in response.summary
+    assert "Burger" in response.summary
+    assert "18% margen" in response.summary
+    assert response.summary.index("Burger") < response.summary.index("Pasta")
+    assert response.artifact["auxiliary_context"]["financial_products"][0]["revenue"] == 900000
+    assert response.artifact["auxiliary_context"]["financial_products"][0]["quantity"] == 95
+
+
+@pytest.mark.asyncio
 async def test_sales_workflow_plans_financial_tool_for_financial_analysis():
     connection = FakeConnection()
     gateway = FakeGateway()

@@ -61,6 +61,26 @@ PRODUCT_RANKING_PROFILE = ShapeProfile(
     active_fields=("quantity", "revenue", "profit"),
 )
 
+PRODUCT_NAME_FIELDS = ("name", "product_name", "productName", "product")
+PRODUCT_REVENUE_FIELDS = ("revenue", "total_revenue", "totalRevenue", "sales_revenue")
+PRODUCT_QUANTITY_FIELDS = (
+    "quantity",
+    "sales",
+    "total_units_sold",
+    "totalQuantity",
+    "units_sold",
+    "order_count",
+)
+PRODUCT_MARGIN_FIELDS = (
+    "margin",
+    "gross_margin",
+    "margin_pct",
+    "profit_margin_pct",
+    "profit_margin_real_pct",
+)
+PRODUCT_PROFIT_FIELDS = ("profit", "total_profit", "gross_profit", "profit_per_unit")
+PRODUCT_COST_FIELDS = ("cost", "total_cost", "estimated_cost", "calculatedCost")
+
 SPANISH_NUMBER_WORDS = {
     "uno": 1,
     "una": 1,
@@ -2589,21 +2609,7 @@ class SalesWorkflow:
             context["financial_insights"] = sanitize_value(financial_result.get("insights", {}))
         if financial_rows:
             context["financial_products"] = [
-                {
-                    "id": row.get("id"),
-                    "name": row.get("name"),
-                    "margin": row.get("margin"),
-                    "revenue": row.get("revenue")
-                    if row.get("revenue") is not None
-                    else row.get("total_revenue"),
-                    "cost": row.get("cost"),
-                    "quantity": row.get("quantity")
-                    if row.get("quantity") is not None
-                    else row.get("sales"),
-                    "profit": row.get("profit"),
-                    "price": row.get("price"),
-                    "classification": row.get("classification"),
-                }
+                self._normalize_financial_product(row)
                 for row in financial_rows[:product_limit]
             ]
         if menu_rows:
@@ -3114,6 +3120,26 @@ class SalesWorkflow:
             }
         )
 
+    def _normalize_financial_product(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row.get("id") or row.get("product_id") or row.get("productId"),
+            "name": self._first_present(row, PRODUCT_NAME_FIELDS),
+            "margin": self._first_present(row, PRODUCT_MARGIN_FIELDS),
+            "revenue": self._first_present(row, PRODUCT_REVENUE_FIELDS),
+            "cost": self._first_present(row, PRODUCT_COST_FIELDS),
+            "quantity": self._first_present(row, PRODUCT_QUANTITY_FIELDS),
+            "profit": self._first_present(row, PRODUCT_PROFIT_FIELDS),
+            "price": row.get("price") or row.get("avg_price") or row.get("avgPrice"),
+            "classification": row.get("classification"),
+        }
+
+    def _first_present(self, row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+        for key in keys:
+            value = row.get(key)
+            if value is not None:
+                return value
+        return None
+
     def _numeric_value(self, value: Any) -> float | None:
         try:
             return float(value)
@@ -3257,22 +3283,34 @@ class SalesWorkflow:
         )
         limit = self._summary_limit(analysis_request, default=5)
         sort_field = self._product_summary_sort_field(analysis_request)
-        ranked = sorted(
-            [product for product in products if isinstance(product, dict)],
-            key=lambda product: self._product_summary_sort_value(product, sort_field),
-            reverse=True,
-        )[:limit]
-        lines = [f"Productos mas relevantes para {label}:"]
+        valid_products = [product for product in products if isinstance(product, dict)]
+        if self._is_volume_margin_product_request(analysis_request):
+            ranked = sorted(
+                valid_products,
+                key=self._volume_margin_sort_value,
+                reverse=True,
+            )[:limit]
+            lines = [f"Productos que venden mucho pero tienen bajo margen para {label}:"]
+        else:
+            ranked = sorted(
+                valid_products,
+                key=lambda product: self._product_summary_sort_value(product, sort_field),
+                reverse=True,
+            )[:limit]
+            lines = [f"Productos mas relevantes para {label}:"]
         for index, product in enumerate(ranked, start=1):
             name = str(product.get("name") or "Producto sin nombre")
             details = []
             quantity = self._numeric_value(product.get("quantity"))
             revenue = self._numeric_value(product.get("revenue"))
             profit = self._numeric_value(product.get("profit"))
+            margin = self._numeric_value(product.get("margin"))
             if quantity is not None:
                 details.append(f"{quantity:g} unidades")
             if revenue is not None:
                 details.append(f"{self._format_cop(revenue)} en ventas")
+            if margin is not None:
+                details.append(f"{self._format_percent(margin)} margen")
             if profit is not None:
                 details.append(f"{self._format_cop(profit)} de ganancia bruta")
             suffix = f" ({', '.join(details)})" if details else ""
@@ -3322,6 +3360,53 @@ class SalesWorkflow:
             or self._numeric_value(product.get("profit"))
             or 0
         )
+
+    def _is_volume_margin_product_request(self, analysis_request: dict[str, Any]) -> bool:
+        requested_metrics = analysis_request.get("requested_metrics")
+        has_metrics = isinstance(requested_metrics, list)
+        margin_requested = has_metrics and any(
+            metric in requested_metrics
+            for metric in {"gross_margin", "margin", "product_profit", "gross_profit"}
+        )
+        volume_requested = has_metrics and any(
+            metric in requested_metrics
+            for metric in {"quantity_sold", "revenue", "sales", "product_ranking"}
+        )
+        operations = analysis_request.get("operations")
+        if isinstance(operations, list):
+            ranked_fields: set[str] = set()
+            for operation in operations:
+                if not isinstance(operation, dict) or not isinstance(operation.get("by"), list):
+                    continue
+                ranked_fields.update(
+                    field for field in operation["by"] if isinstance(field, str)
+                )
+            margin_requested = margin_requested or bool(
+                ranked_fields.intersection({"margin", "gross_margin"})
+            )
+            volume_requested = volume_requested or bool(
+                ranked_fields.intersection({"quantity", "revenue", "sales"})
+            )
+        return bool(margin_requested and volume_requested)
+
+    def _volume_margin_sort_value(self, product: dict[str, Any]) -> tuple[float, float, float]:
+        activity = (
+            self._numeric_value(product.get("quantity"))
+            or self._numeric_value(product.get("revenue"))
+            or 0
+        )
+        margin = self._normalized_margin_value(product.get("margin"))
+        revenue = self._numeric_value(product.get("revenue")) or 0
+        low_margin_pressure = max(0.0, 100.0 - margin) / 100.0
+        return (activity * low_margin_pressure, activity, revenue)
+
+    def _normalized_margin_value(self, value: Any) -> float:
+        numeric = self._numeric_value(value)
+        if numeric is None:
+            return 0
+        if abs(numeric) <= 1:
+            return numeric * 100
+        return numeric
 
     def _build_customer_fallback_summary(self, artifact: dict[str, Any]) -> str:
         auxiliary_context = (
@@ -3431,6 +3516,12 @@ class SalesWorkflow:
         except (TypeError, ValueError):
             return str(value)
         return "$" + f"{numeric:,}".replace(",", ".")
+
+    def _format_percent(self, value: Any) -> str:
+        numeric = self._normalized_margin_value(value)
+        if numeric.is_integer():
+            return f"{int(numeric)}%"
+        return f"{numeric:.2f}%"
 
     def _period_label(self, period: dict[str, Any]) -> str:
         date_from = period.get("date_from")
