@@ -24,7 +24,22 @@ require_file() {
 
 ensure_waro_cli() {
   local cli="$REPO/services/agent-api/.local/bin/waro"
+  local source_dir="$REPO/../waro-cli"
+  if [[ ! -x "$cli" ]] || ! "$cli" --help 2>/dev/null | grep -q 'agent-json' || ! "$cli" schema customers list 2>/dev/null | grep -q '"response"'; then
+    if [[ -f "$source_dir/Cargo.toml" ]]; then
+      echo "WARO CLI no tiene contrato agent-json actualizado; reconstruyendo desde $source_dir..."
+      (cd "$REPO/services/agent-api" && ./scripts/build-linux-waro-cli.sh --source "$source_dir")
+    fi
+  fi
   [[ -x "$cli" ]] || { echo "Falta WARO CLI ejecutable: $cli"; exit 1; }
+  "$cli" --help 2>/dev/null | grep -q 'agent-json' || {
+    echo "WARO CLI en $cli no soporta --output agent-json. Reconstruye con: cd $REPO/services/agent-api && ./scripts/build-linux-waro-cli.sh --source $source_dir"
+    exit 1
+  }
+  "$cli" schema customers list 2>/dev/null | grep -q '"response"' || {
+    echo "WARO CLI en $cli no expone response contracts en waro schema."
+    exit 1
+  }
   echo "WARO CLI: $("$cli" --version 2>/dev/null || echo ok)"
 }
 
