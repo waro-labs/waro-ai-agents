@@ -82,6 +82,10 @@ class RequestTraceMiddleware:
 
         method = str(scope.get("method", "GET"))
         path = str(scope.get("path", ""))
+        if path == "/health":
+            await self.app(scope, receive, send)
+            return
+
         span_name = f"{method} {path}"
         status_code: int | None = None
 
