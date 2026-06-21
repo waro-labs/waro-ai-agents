@@ -5,6 +5,7 @@ from typing import Any
 
 from app.agent.capabilities import CapabilityMatch, coverage_for_match, required_coverage
 from app.agent.intent import QuestionIntent
+from app.agent.profiles import profile_for_intent
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,9 @@ def build_tool_plan(intent: QuestionIntent, matches: list[CapabilityMatch]) -> T
 
 
 def _select_matches(intent: QuestionIntent, accepted: list[CapabilityMatch]) -> list[CapabilityMatch]:
+    profile = profile_for_intent(intent)
+    if profile is not None and profile.tool_priorities:
+        return _select_profile_matches(accepted, profile.tool_priorities, max_steps=profile.max_steps)
     selected: list[CapabilityMatch] = []
     coverage: set[str] = set()
     required = _effective_required_coverage(intent)
@@ -89,6 +93,25 @@ def _select_matches(intent: QuestionIntent, accepted: list[CapabilityMatch]) -> 
     return selected[:3] if selected else accepted[:1]
 
 
+def _select_profile_matches(
+    accepted: list[CapabilityMatch],
+    tool_priorities: tuple[str, ...],
+    *,
+    max_steps: int,
+) -> list[CapabilityMatch]:
+    by_name = {match.capability.tool_name: match for match in accepted}
+    selected: list[CapabilityMatch] = []
+    for tool_name in tool_priorities:
+        match = by_name.get(tool_name)
+        if match is not None:
+            selected.append(match)
+        if len(selected) >= max_steps:
+            break
+    if selected:
+        return selected
+    return accepted[:max_steps]
+
+
 def _step_for(intent: QuestionIntent, match: CapabilityMatch) -> ToolPlanStep:
     capability = match.capability
     args: dict[str, Any] = {}
@@ -102,7 +125,9 @@ def _step_for(intent: QuestionIntent, match: CapabilityMatch) -> ToolPlanStep:
             "sort-by": _product_sort(intent),
         }
     elif capability.tool_name == "waro.sales.metrics":
-        if intent.entity == "product" or "product" in intent.dimensions:
+        if intent.entity == "product" or (
+            intent.entity != "business" and "product" in intent.dimensions
+        ):
             args["group-by"] = "product"
         if "hour" in intent.dimensions:
             args["group-by"] = "hour"
@@ -114,6 +139,18 @@ def _step_for(intent: QuestionIntent, match: CapabilityMatch) -> ToolPlanStep:
         args["sort-direction"] = "desc"
     elif capability.tool_name == "waro.analytics.menu":
         args["limit"] = 20
+    elif capability.tool_name == "waro.analytics.waros":
+        if "customer" in intent.dimensions or intent.grain == "period_or_customer":
+            args["group-by"] = "customer"
+        elif "week" in intent.dimensions:
+            args["group-by"] = "week"
+        else:
+            args["group-by"] = "day"
+    elif capability.tool_name == "waro.analytics.cohort":
+        args.setdefault("period", "weekly")
+        args.setdefault("periods", 8)
+    elif capability.tool_name == "waro.analytics.churn_risk":
+        args.setdefault("limit", 20)
     return ToolPlanStep(
         tool_name=capability.tool_name,
         arguments=args,
@@ -131,6 +168,8 @@ def _effective_required_coverage(intent: QuestionIntent) -> set[str]:
         required.discard("grain:product_period")
     if intent.entity == "customer":
         required.discard("grain:customer_period")
+    if intent.entity == "business":
+        return set()
     return required
 
 

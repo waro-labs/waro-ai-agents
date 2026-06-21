@@ -45,16 +45,6 @@ class AgentLoop:
     ) -> dict[str, Any]:
         with self.tracer.start_as_current_span("agent.intent_capability_loop") as span:
             span.set_attribute("waro.agent.engine_version", "intent-capability-v1")
-            intent = await parse_question_intent(
-                settings=self.settings,
-                llm_adapter=self.llm_adapter,
-                question=question,
-                conversation_messages=conversation_messages,
-            )
-            span.set_attribute("waro.intent.entity", intent.entity)
-            span.set_attribute("waro.intent.measures", ",".join(intent.measures))
-            span.set_attribute("waro.intent.operations", ",".join(intent.operations))
-
             snapshot = await self.registry.refresh()
             capabilities = [
                 capability_from_spec(
@@ -72,6 +62,17 @@ class AgentLoop:
                 )
                 for name, spec in snapshot.tools.items()
             ]
+            intent = await parse_question_intent(
+                settings=self.settings,
+                llm_adapter=self.llm_adapter,
+                question=question,
+                conversation_messages=conversation_messages,
+                capability_hints=[capability.to_dict() for capability in capabilities],
+            )
+            span.set_attribute("waro.intent.entity", intent.entity)
+            span.set_attribute("waro.intent.measures", ",".join(intent.measures))
+            span.set_attribute("waro.intent.operations", ",".join(intent.operations))
+
             matches = match_tools(intent, capabilities, scopes=context.scopes)
             plan = build_tool_plan(intent, matches)
             span.set_attribute("waro.plan.valid", plan.valid)

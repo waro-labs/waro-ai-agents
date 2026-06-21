@@ -1,0 +1,101 @@
+{
+  "schema_version": "waro.agent_profiles.v1",
+  "profiles": [
+    {
+      "id": "business_analyst",
+      "description": "Diagnostica comportamiento general del negocio usando ventas, productos, margen, clientes y retencion.",
+      "match": {
+        "entities": ["business"],
+        "operations": ["diagnose", "summarize", "compare"]
+      },
+      "planning": {
+        "max_steps": 7,
+        "tool_priorities": [
+          "waro.sales.metrics",
+          "waro.financial.products",
+          "waro.analytics.food_cost",
+          "waro.analytics.menu",
+          "waro.customers.list",
+          "waro.customers.metrics",
+          "waro.analytics.cohort",
+          "waro.analytics.waros"
+        ]
+      },
+      "analysis": {
+        "tool_groups": {
+          "products": [
+            "waro.financial.products",
+            "waro.analytics.food_cost",
+            "waro.analytics.menu"
+          ],
+          "customers": [
+            "waro.customers.list",
+            "waro.customers.metrics"
+          ],
+          "cohorts": [
+            "waro.analytics.cohort"
+          ],
+          "loyalty": [
+            "waro.analytics.waros"
+          ]
+        },
+        "signals": [
+          {
+            "id": "high_volume_low_margin",
+            "kind": "threshold_rows",
+            "group": "products",
+            "positive_field_any": ["quantity", "quantity_sold", "total_units_sold", "sales"],
+            "max_field_any": ["margin", "margin_pct", "profit_margin_pct", "profit_margin_real_pct"],
+            "max_value": 40,
+            "sample_name_any": ["name", "product_name", "id"],
+            "pattern": "Hay productos con volumen y margen bajo: {sample}.",
+            "risk": "El negocio puede estar dependiendo de productos que mueven venta pero dejan poca utilidad.",
+            "recommended_action": "Revisar precio, receta/costo y combos de los productos de mayor volumen con margen bajo."
+          },
+          {
+            "id": "generic_customer_concentration",
+            "kind": "name_match",
+            "group": "customers",
+            "name_field_any": ["name", "customer_name"],
+            "match_values": ["generico", "genérico"],
+            "pattern": "El cliente Genérico concentra actividad y puede distorsionar lectura de clientes reales.",
+            "risk": "La retención y frecuencia pueden verse artificialmente altas si se mezclan clientes identificados con ventas genéricas.",
+            "recommended_action": "Separar análisis de cliente identificado vs cliente Genérico para medir recompra real."
+          },
+          {
+            "id": "short_identified_customer_tail",
+            "kind": "active_rows",
+            "group": "customers",
+            "positive_field_any": ["order_count", "total_spent"],
+            "sample_name_any": ["name", "customer_name", "customer_id"],
+            "pattern": "El ranking de clientes tiene una cola corta de compradores identificados; lidera {sample}.",
+            "opportunity": "Activar campañas para convertir compradores de una sola compra en recurrentes."
+          },
+          {
+            "id": "weak_early_cohort_retention",
+            "kind": "cohort_retention_threshold",
+            "group": "cohorts",
+            "max_value": 20,
+            "pattern": "Algunas cohortes muestran baja retención temprana.",
+            "risk": "La recompra temprana puede ser insuficiente para sostener crecimiento sin adquisición constante.",
+            "recommended_action": "Medir una acción de reactivación entre la primera y segunda compra."
+          }
+        ],
+        "missing_evidence_limitations": [
+          {
+            "group": "products",
+            "message": "No hubo evidencia de productos/margen; la lectura de rentabilidad queda limitada."
+          },
+          {
+            "group": "customers",
+            "message": "No hubo evidencia de clientes; la lectura de comportamiento de recompra queda limitada."
+          },
+          {
+            "group": "cohorts",
+            "message": "No hubo evidencia de cohortes en este plan; la lectura de retención queda limitada."
+          }
+        ]
+      }
+    }
+  ]
+}

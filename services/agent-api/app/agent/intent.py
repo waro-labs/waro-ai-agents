@@ -5,20 +5,60 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Literal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import Settings
 from app.llm.base import LLMAdapter, LLMMessage
 from app.llm.model_router import model_for
 
-Entity = Literal["sale", "order", "product", "customer", "menu_item", "financial", "unknown"]
-Grain = Literal["period", "product_period", "customer_period", "order", "daily_series", "unknown"]
-Answerability = Literal["answerable", "partial", "blocked"]
+Entity = str
+Grain = str
+Answerability = str
 
-KNOWN_ENTITIES = {"sale", "order", "product", "customer", "menu_item", "financial", "unknown"}
-KNOWN_GRAINS = {"period", "product_period", "customer_period", "order", "daily_series", "unknown"}
-KNOWN_OPERATIONS = {"aggregate", "rank", "filter", "compare", "diagnose", "summarize", "group", "sort", "limit"}
+KNOWN_ENTITIES = {
+    "sale",
+    "order",
+    "product",
+    "customer",
+    "menu_item",
+    "financial",
+    "business",
+    "loyalty_transaction",
+    "loyalty_balance",
+    "loyalty_customer",
+    "unknown",
+}
+KNOWN_GRAINS = {
+    "period",
+    "period_or_group",
+    "period_or_customer",
+    "product_period",
+    "customer_period",
+    "customer_period_summary",
+    "customer_period_segment",
+    "customer_risk",
+    "cohort_period",
+    "order",
+    "daily_series",
+    "business_period",
+    "unknown",
+}
+KNOWN_OPERATIONS = {
+    "aggregate",
+    "rank",
+    "filter",
+    "compare",
+    "diagnose",
+    "summarize",
+    "group",
+    "sort",
+    "limit",
+    "segment",
+    "list",
+    "lookup",
+    "calculate",
+}
 
 
 @dataclass(frozen=True)
@@ -63,8 +103,10 @@ async def parse_question_intent(
     llm_adapter: LLMAdapter,
     question: str,
     conversation_messages: list[dict[str, str]] | None = None,
+    capability_hints: list[dict[str, Any]] | None = None,
 ) -> QuestionIntent:
-    fallback = heuristic_intent(question)
+    vocabulary = vocabulary_from_capabilities(capability_hints or [])
+    fallback = heuristic_intent(question, capability_hints=capability_hints)
     if settings.llm_provider == "disabled":
         return fallback
 
@@ -73,10 +115,13 @@ async def parse_question_intent(
         "conversation_messages": conversation_messages or [],
         "fallback_intent": fallback.to_dict(),
         "allowed": {
-            "entity": sorted(KNOWN_ENTITIES),
-            "grain": sorted(KNOWN_GRAINS),
-            "operations": sorted(KNOWN_OPERATIONS),
+            "entity": sorted(vocabulary["entities"]),
+            "grain": sorted(vocabulary["grains"]),
+            "measures": sorted(vocabulary["measures"]),
+            "dimensions": sorted(vocabulary["dimensions"]),
+            "operations": sorted(vocabulary["operations"]),
         },
+        "capabilities": capability_hints or [],
     }
     messages = [
         LLMMessage(
@@ -98,13 +143,22 @@ async def parse_question_intent(
         )
         parsed = json.loads(response.content.strip())
         if isinstance(parsed, dict):
-            return coerce_intent(parsed, fallback=fallback, source="llm")
+            return coerce_intent(
+                parsed,
+                fallback=fallback,
+                source="llm",
+                allowed=vocabulary,
+            )
     except Exception:
         pass
     return fallback
 
 
-def heuristic_intent(question: str) -> QuestionIntent:
+def heuristic_intent(
+    question: str,
+    capability_hints: list[dict[str, Any]] | None = None,
+) -> QuestionIntent:
+    _ = capability_hints
     normalized = normalize_text(question)
     today = datetime.now(ZoneInfo("America/Bogota")).date()
     time_range = infer_time_range(normalized, today=today)
@@ -114,11 +168,60 @@ def heuristic_intent(question: str) -> QuestionIntent:
     dimensions: list[str] = []
     operations: list[str] = []
 
-    if re.search(r"\b(clientes?|customers?)\b", normalized):
+    if re.search(
+        r"\b(negocio|comportamientos?|analisis profundo|diagnostico|salud del negocio|que puedo identificar)\b",
+        normalized,
+    ):
+        entity = "business"
+        grain = "business_period"
+        measures.extend(
+            [
+                "total_sales",
+                "avg_ticket",
+                "order_count",
+                "quantity_sold",
+                "revenue",
+                "margin",
+                "total_spent",
+                "retention_pct",
+            ]
+        )
+        dimensions.extend(["date", "product", "customer", "cohort"])
+        operations.extend(["summarize", "diagnose", "compare", "rank"])
+    elif re.search(r"\b(waros?|puntos?|redencion|redenciones|fidelidad|loyalty)\b", normalized):
+        entity = "loyalty_transaction"
+        grain = "period_or_customer"
+        measures.append("total_issued")
+        if re.search(r"\b(redim|redencion|redenciones|usados?)\b", normalized):
+            measures.append("total_redeemed")
+        if re.search(r"\b(tasa|porcentaje|rate)\b", normalized):
+            measures.append("redemption_rate_pct")
+        if re.search(r"\b(clientes?|customers?)\b", normalized):
+            dimensions.append("customer")
+            operations.append("rank")
+    elif re.search(r"\b(cohortes?|cohorts?|retencion por cohortes?)\b", normalized):
+        entity = "customer"
+        grain = "cohort_period"
+        dimensions.append("cohort")
+        measures.extend(["retention_pct", "cohort_size"])
+        operations.extend(["aggregate", "summarize"])
+    elif re.search(r"\b(rfm|segmentacion|segmenta|champions?|loyal|hibernating|lost)\b", normalized):
+        entity = "customer"
+        grain = "customer_period_segment"
+        dimensions.append("segment")
+        measures.extend(["r_score", "f_score", "m_score", "total_spent", "order_count"])
+        operations.extend(["segment", "summarize"])
+    elif re.search(r"\b(churn|abandono|riesgo|no han vuelto|no ha vuelto|silenciosos?)\b", normalized):
+        entity = "customer"
+        grain = "customer_risk"
+        dimensions.append("customer")
+        measures.extend(["risk_score", "days_since_last_order", "lifetime_value"])
+        operations.extend(["rank", "diagnose"])
+    elif re.search(r"\b(clientes?|customers?)\b", normalized):
         entity = "customer"
         grain = "customer_period"
         dimensions.append("customer")
-    if re.search(r"\b(productos?|items?|platos?|menu)\b", normalized):
+    if entity != "business" and re.search(r"\b(productos?|items?|platos?|menu)\b", normalized):
         entity = "product"
         grain = "product_period"
         dimensions.append("product")
@@ -175,6 +278,8 @@ def heuristic_intent(question: str) -> QuestionIntent:
         measures.extend(["quantity_sold", "revenue"])
     if entity == "customer" and not measures:
         measures.extend(["total_spent", "order_count"])
+    if entity == "business":
+        requires_cross_tool = True
 
     return QuestionIntent(
         entity=entity,
@@ -203,12 +308,24 @@ def infer_time_range(normalized: str, *, today: date) -> TimeRange:
     return TimeRange(None, None, label="")
 
 
-def coerce_intent(payload: dict[str, Any], *, fallback: QuestionIntent, source: str) -> QuestionIntent:
+def coerce_intent(
+    payload: dict[str, Any],
+    *,
+    fallback: QuestionIntent,
+    source: str,
+    allowed: dict[str, set[str]] | None = None,
+) -> QuestionIntent:
+    allowed = allowed or vocabulary_from_capabilities([])
     entity = str(payload.get("entity") or fallback.entity)
     grain = str(payload.get("grain") or fallback.grain)
-    if entity not in KNOWN_ENTITIES:
+    if _is_specific_domain_intent(fallback) and (
+        entity != fallback.entity or grain != fallback.grain
+    ):
         entity = fallback.entity
-    if grain not in KNOWN_GRAINS:
+        grain = fallback.grain
+    if entity not in allowed["entities"]:
+        entity = fallback.entity
+    if grain not in allowed["grains"]:
         grain = fallback.grain
 
     time_payload = payload.get("time_range") if isinstance(payload.get("time_range"), dict) else {}
@@ -221,11 +338,13 @@ def coerce_intent(payload: dict[str, Any], *, fallback: QuestionIntent, source: 
     measures = tuple(normalize_measures_for_entity(entity, _dedupe([*fallback.measures, *_string_list(payload.get("measures"))])))
     dimensions = tuple(_dedupe([*fallback.dimensions, *_string_list(payload.get("dimensions"))]))
     operations = tuple(
-        item for item in _dedupe([*fallback.operations, *_string_list(payload.get("operations"))]) if item in KNOWN_OPERATIONS
+        item
+        for item in _dedupe([*fallback.operations, *_string_list(payload.get("operations"))])
+        if item in allowed["operations"]
     )
     return QuestionIntent(
-        entity=entity,  # type: ignore[arg-type]
-        grain=grain,  # type: ignore[arg-type]
+        entity=entity,
+        grain=grain,
         measures=measures,
         dimensions=dimensions,
         operations=operations or fallback.operations,
@@ -236,6 +355,14 @@ def coerce_intent(payload: dict[str, Any], *, fallback: QuestionIntent, source: 
         ambiguities=tuple(_string_list(payload.get("ambiguities"))),
         source=source,
     )
+
+
+def _is_specific_domain_intent(intent: QuestionIntent) -> bool:
+    return intent.entity in {"loyalty_transaction", "loyalty_balance", "loyalty_customer"} or intent.grain in {
+        "cohort_period",
+        "customer_period_segment",
+        "customer_risk",
+    }
 
 
 def _string_list(value: Any) -> list[str]:
@@ -281,6 +408,22 @@ def normalize_measure(value: str) -> str:
         "estimated_cost": "cost",
         "total_spent": "total_spent",
         "spent": "total_spent",
+        "total_issued": "total_issued",
+        "issued": "total_issued",
+        "earned": "total_issued",
+        "total_earned": "total_issued",
+        "total_redeemed": "total_redeemed",
+        "redeemed": "total_redeemed",
+        "redemption_rate_pct": "redemption_rate_pct",
+        "retention_pct": "retention_pct",
+        "retention": "retention_pct",
+        "cohort_size": "cohort_size",
+        "risk_score": "risk_score",
+        "days_since_last_order": "days_since_last_order",
+        "lifetime_value": "lifetime_value",
+        "r_score": "r_score",
+        "f_score": "f_score",
+        "m_score": "m_score",
     }
     return aliases.get(normalized, normalized)
 
@@ -296,3 +439,30 @@ def normalize_measures_for_entity(entity: str, measures: list[str]) -> list[str]
         if value not in normalized:
             normalized.append(value)
     return normalized
+
+
+def vocabulary_from_capabilities(capabilities: list[dict[str, Any]]) -> dict[str, set[str]]:
+    entities = set(KNOWN_ENTITIES)
+    grains = set(KNOWN_GRAINS)
+    measures: set[str] = set()
+    dimensions: set[str] = set()
+    operations = set(KNOWN_OPERATIONS)
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            continue
+        entity = capability.get("entity")
+        grain = capability.get("grain")
+        if entity:
+            entities.add(str(entity))
+        if grain:
+            grains.add(str(grain))
+        measures.update(normalize_measure(str(item)) for item in _string_list(capability.get("measures")))
+        dimensions.update(normalize_measure(str(item)) for item in _string_list(capability.get("dimensions")))
+        operations.update(normalize_measure(str(item)) for item in _string_list(capability.get("supported_operations")))
+    return {
+        "entities": entities,
+        "grains": grains,
+        "measures": measures,
+        "dimensions": dimensions,
+        "operations": operations,
+    }

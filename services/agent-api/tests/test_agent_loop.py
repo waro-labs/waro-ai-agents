@@ -5,11 +5,12 @@ from uuid import uuid4
 import pytest
 
 from app.agent.classifier import classify_complexity, heuristic_complexity
-from app.agent.capabilities import capability_from_spec, match_tools
+from app.agent.capabilities import ToolCapability, capability_from_spec, match_tools
 from app.agent.evidence import build_evidence_artifact, deterministic_evidence_summary
-from app.agent.intent import heuristic_intent
+from app.agent.intent import coerce_intent, heuristic_intent
 from app.agent.loop import AgentLoop
 from app.agent.plan import build_tool_plan
+from app.agent.profiles import profile_for_intent
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
 from app.llm.base import LLMError, LLMMessage, LLMResponse
@@ -133,6 +134,172 @@ async def test_question_intent_customer_frequency_vs_spend():
     assert "compare" in intent.operations
 
 
+@pytest.mark.asyncio
+async def test_question_intent_business_behavior_analysis():
+    intent = heuristic_intent("quiero que me hables mas de este negocio que comportamientos tiene segun sus ventas")
+    assert intent.entity == "business"
+    assert intent.grain == "business_period"
+    assert "total_sales" in intent.measures
+    assert "margin" in intent.measures
+    assert "diagnose" in intent.operations
+    assert intent.requires_cross_tool is True
+
+
+@pytest.mark.asyncio
+async def test_question_intent_waros_customer_generation():
+    intent = heuristic_intent("¿Qué clientes han generado más WAROS este mes?")
+    assert intent.entity == "loyalty_transaction"
+    assert intent.grain == "period_or_customer"
+    assert "total_issued" in intent.measures
+    assert "customer" in intent.dimensions
+    assert "rank" in intent.operations
+
+
+@pytest.mark.asyncio
+async def test_question_intent_keeps_specific_waros_fallback_when_llm_is_generic():
+    fallback = heuristic_intent("¿Qué clientes han generado más WAROS este mes?")
+    intent = coerce_intent(
+        {
+            "entity": "customer",
+            "grain": "customer_period",
+            "measures": ["total_spent"],
+            "operations": ["rank"],
+        },
+        fallback=fallback,
+        source="llm",
+    )
+    assert intent.entity == "loyalty_transaction"
+    assert intent.grain == "period_or_customer"
+    assert "total_issued" in intent.measures
+
+
+@pytest.mark.asyncio
+async def test_question_intent_customer_cohort_retention():
+    intent = heuristic_intent("¿Cómo está la retención de clientes por cohortes este mes?")
+    assert intent.entity == "customer"
+    assert intent.grain == "cohort_period"
+    assert "retention_pct" in intent.measures
+    assert "cohort" in intent.dimensions
+
+
+def _dynamic_capability(
+    *,
+    tool_name: str,
+    entity: str,
+    grain: str,
+    measures: tuple[str, ...],
+    dimensions: tuple[str, ...],
+    operations: tuple[str, ...],
+    scope: str = "analytics:read",
+    default_fields: tuple[str, ...] = ("data",),
+    supports_period: bool = True,
+) -> ToolCapability:
+    return ToolCapability(
+        tool_name=tool_name,
+        scope=scope,
+        domain="analytics",
+        entity=entity,
+        grain=grain,
+        measures=measures,
+        dimensions=dimensions,
+        operations=operations,
+        supports_period=supports_period,
+        default_fields=default_fields,
+        arguments_schema={},
+    )
+
+
+def test_capability_matcher_routes_waros_question_to_waros_tool():
+    intent = heuristic_intent("¿Qué clientes han generado más WAROS este mes?")
+    waros = _dynamic_capability(
+        tool_name="waro.analytics.waros",
+        entity="loyalty_transaction",
+        grain="period_or_customer",
+        measures=("total_issued", "total_redeemed", "redemption_rate_pct"),
+        dimensions=("customer", "period"),
+        operations=("aggregate", "group", "rank", "summarize"),
+        default_fields=("groups", "summary"),
+    )
+    customers = capability_from_spec(TOOL_SPECS["waro.customers.list"])
+
+    matches = match_tools(
+        intent,
+        [customers, waros],
+        scopes=("analytics:read", "customers:read"),
+    )
+    by_name = {match.capability.tool_name: match for match in matches}
+    assert by_name["waro.analytics.waros"].accepted is True
+    assert by_name["waro.customers.list"].accepted is False
+
+    plan = build_tool_plan(intent, matches)
+    assert plan.valid is True
+    assert [step.tool_name for step in plan.steps] == ["waro.analytics.waros"]
+    assert plan.steps[0].arguments["group-by"] == "customer"
+
+
+def test_capability_matcher_routes_cohort_question_to_cohort_tool():
+    intent = heuristic_intent("¿Cómo está la retención de clientes por cohortes este mes?")
+    cohort = _dynamic_capability(
+        tool_name="waro.analytics.cohort",
+        entity="customer",
+        grain="cohort_period",
+        measures=("cohort_size", "retention_pct"),
+        dimensions=("cohort", "cohort_date"),
+        operations=("aggregate", "summarize", "compare"),
+        default_fields=("cohorts", "period", "periods"),
+    )
+    customers = capability_from_spec(TOOL_SPECS["waro.customers.list"])
+
+    matches = match_tools(
+        intent,
+        [customers, cohort],
+        scopes=("analytics:read", "customers:read"),
+    )
+    by_name = {match.capability.tool_name: match for match in matches}
+    assert by_name["waro.analytics.cohort"].accepted is True
+    assert by_name["waro.customers.list"].accepted is False
+
+    plan = build_tool_plan(intent, matches)
+    assert plan.valid is True
+    assert [step.tool_name for step in plan.steps] == ["waro.analytics.cohort"]
+
+
+def test_business_analysis_plan_uses_multiple_capability_domains():
+    intent = heuristic_intent("quiero que me hables mas de este negocio que comportamientos tiene segun sus ventas")
+    profile = profile_for_intent(intent)
+    assert profile is not None
+    assert profile.id == "business_analyst"
+    capabilities = [
+        capability_from_spec(TOOL_SPECS["waro.sales.metrics"]),
+        capability_from_spec(TOOL_SPECS["waro.financial.products"]),
+        capability_from_spec(TOOL_SPECS["waro.analytics.food_cost"]),
+        capability_from_spec(TOOL_SPECS["waro.customers.list"]),
+        _dynamic_capability(
+            tool_name="waro.analytics.cohort",
+            entity="customer",
+            grain="cohort_period",
+            measures=("cohort_size", "retention_pct"),
+            dimensions=("cohort",),
+            operations=("aggregate", "summarize", "diagnose"),
+            default_fields=("cohorts", "period", "periods"),
+        ),
+    ]
+    matches = match_tools(
+        intent,
+        capabilities,
+        scopes=("orders:read", "financial:read", "analytics:read", "customers:read"),
+    )
+    plan = build_tool_plan(intent, matches)
+    assert plan.valid is True
+    assert [step.tool_name for step in plan.steps] == [
+        "waro.sales.metrics",
+        "waro.financial.products",
+        "waro.analytics.food_cost",
+        "waro.customers.list",
+        "waro.analytics.cohort",
+    ]
+
+
 def test_capability_matcher_rejects_sales_list_for_product_margin():
     intent = heuristic_intent("Dime qué productos vendieron mucho este mes pero tienen bajo margen.")
     capabilities = [capability_from_spec(spec) for spec in TOOL_SPECS.values()]
@@ -219,6 +386,143 @@ def test_evidence_merges_product_sales_and_margin_rows():
     assert "50 unidades" in summary
     assert "$1.000.000 vendido" in summary
     assert "margen 12%" in summary
+
+
+def test_evidence_summarizes_waros_customer_rows():
+    intent = heuristic_intent("¿Qué clientes han generado más WAROS este mes?")
+    waros = _dynamic_capability(
+        tool_name="waro.analytics.waros",
+        entity="loyalty_transaction",
+        grain="period_or_customer",
+        measures=("total_issued", "total_redeemed"),
+        dimensions=("customer",),
+        operations=("rank", "group"),
+        default_fields=("groups", "summary"),
+    )
+    plan = build_tool_plan(
+        intent,
+        match_tools(intent, [waros], scopes=("analytics:read",)),
+    )
+    artifact = build_evidence_artifact(
+        question="¿Qué clientes han generado más WAROS este mes?",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.analytics.waros",
+                "status": "succeeded",
+                "result": {
+                    "rows": [
+                        {
+                            "name": "Ana",
+                            "total_earned": 120,
+                            "total_redeemed": 20,
+                            "transaction_count": 3,
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+    summary = deterministic_evidence_summary(artifact)
+    assert "Clientes que mas generaron WAROS" in summary
+    assert "Ana" in summary
+    assert "120 WAROS generados" in summary
+
+
+def test_evidence_summarizes_cohort_rows():
+    intent = heuristic_intent("¿Cómo está la retención de clientes por cohortes este mes?")
+    cohort = _dynamic_capability(
+        tool_name="waro.analytics.cohort",
+        entity="customer",
+        grain="cohort_period",
+        measures=("cohort_size", "retention_pct"),
+        dimensions=("cohort",),
+        operations=("aggregate", "summarize"),
+        default_fields=("cohorts", "period", "periods"),
+    )
+    plan = build_tool_plan(
+        intent,
+        match_tools(intent, [cohort], scopes=("analytics:read",)),
+    )
+    artifact = build_evidence_artifact(
+        question="¿Cómo está la retención de clientes por cohortes este mes?",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.analytics.cohort",
+                "status": "succeeded",
+                "result": {
+                    "rows": [
+                        {
+                            "cohort_label": "2026-W24",
+                            "cohort_size": 12,
+                            "retention": [{"pct": 25.0}],
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+    summary = deterministic_evidence_summary(artifact)
+    assert "Retencion por cohortes" in summary
+    assert "2026-W24" in summary
+    assert "12 clientes iniciales" in summary
+
+
+def test_evidence_summarizes_business_analysis_patterns():
+    intent = heuristic_intent("quiero que me hables mas de este negocio que comportamientos tiene segun sus ventas")
+    plan = build_tool_plan(
+        intent,
+        match_tools(
+            intent,
+            [
+                capability_from_spec(TOOL_SPECS["waro.sales.metrics"]),
+                capability_from_spec(TOOL_SPECS["waro.financial.products"]),
+                capability_from_spec(TOOL_SPECS["waro.customers.list"]),
+            ],
+            scopes=("orders:read", "financial:read", "customers:read"),
+        ),
+    )
+    artifact = build_evidence_artifact(
+        question="quiero que me hables mas de este negocio que comportamientos tiene segun sus ventas",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.sales.metrics",
+                "status": "succeeded",
+                "result": {"data": {"totalSales": 98155500, "avgTicket": 24266, "totalOrders": 404}},
+            },
+            {
+                "tool_name": "waro.financial.products",
+                "status": "succeeded",
+                "result": {
+                    "products": [
+                        {"name": "HOT DOG SENCILLO", "quantity": 80, "revenue": 1600000, "margin": 35}
+                    ]
+                },
+            },
+            {
+                "tool_name": "waro.customers.list",
+                "status": "succeeded",
+                "result": {
+                    "rows": [
+                        {"name": "Genérico", "order_count": 388, "total_spent": 10648000},
+                        {"name": "Ana", "order_count": 2, "total_spent": 94000},
+                    ]
+                },
+            },
+        ],
+    )
+    summary = deterministic_evidence_summary(artifact)
+    assert "Analisis del negocio" in summary
+    assert "Datos base" in summary
+    assert "Comportamientos detectados" in summary
+    assert "Genérico" in summary
+    assert "margen bajo" in summary
+    assert "Acciones recomendadas" in summary
 
 
 def test_capability_uses_schema_default_fields_over_legacy_defaults():

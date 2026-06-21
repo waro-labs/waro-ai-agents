@@ -15,9 +15,12 @@ def compose_summary_messages(*, artifact: dict[str, Any]) -> list[LLMMessage]:
             content=(
                 "Redacta la respuesta final en espanol para el usuario de WARO. "
                 "Usa unicamente artifact.metrics, artifact.ranked_rows, artifact.evidence, "
-                "artifact.limitations y artifact.tool_results. "
+                "artifact.analysis, artifact.agent_profile, artifact.limitations y artifact.tool_results. "
                 "No inventes ventas, ordenes, productos ni tendencias. "
                 "Si safe_to_answer es false, responde solo el error_message. "
+                "Para preguntas abiertas de negocio, prioriza artifact.analysis.facts, "
+                "patterns, risks, opportunities y recommended_actions. "
+                "Usa artifact.agent_profile como rol analitico si existe. "
                 "No respondas 'Encontre datos' sin datos concretos."
             ),
         ),

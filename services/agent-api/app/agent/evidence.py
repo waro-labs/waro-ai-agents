@@ -4,6 +4,7 @@ from typing import Any
 
 from app.agent.intent import QuestionIntent
 from app.agent.plan import ToolPlan
+from app.agent.profiles import first_value, normalized_any, profile_for_intent, rows_for_group
 from app.tools.sanitize import sanitize_value
 
 
@@ -16,9 +17,11 @@ def build_evidence_artifact(
     conversation_messages: list[dict[str, str]] | None = None,
     classification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    profile = profile_for_intent(intent)
     tables = [_table_from_observation(observation) for observation in observations]
     metrics = _merge_metrics(tables)
     ranked_rows = _ranked_rows(intent, tables)
+    analysis = _analysis_from_evidence(intent, tables, metrics, ranked_rows)
     failed = [obs for obs in observations if obs.get("status") != "succeeded"]
     if not plan.valid:
         answerability = "blocked"
@@ -41,6 +44,11 @@ def build_evidence_artifact(
         "intent": "agent_query",
         "agent_mode": True,
         "agent_engine_version": "intent-capability-v1",
+        "agent_profile": (
+            {"id": profile.id, "description": profile.description}
+            if profile is not None
+            else None
+        ),
         "question": question,
         "question_intent": intent.to_dict(),
         "classification": classification or {},
@@ -50,6 +58,7 @@ def build_evidence_artifact(
         "tables": tables,
         "metrics": metrics,
         "ranked_rows": ranked_rows,
+        "analysis": analysis,
         "evidence": _evidence(tables),
         "limitations": _limitations(plan, failed),
         "answerability": answerability,
@@ -78,6 +87,8 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
     rows = artifact.get("ranked_rows") if isinstance(artifact.get("ranked_rows"), list) else []
     period = intent.get("time_range", {}).get("label") if isinstance(intent.get("time_range"), dict) else ""
 
+    if entity == "business":
+        return _business_analysis_summary(artifact, period)
     if entity == "sale" and ("total_sales" in measures or "avg_ticket" in measures):
         total = _fmt_money(metrics.get("total_sales"))
         avg = _fmt_money(metrics.get("avg_ticket"))
@@ -104,6 +115,58 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
             lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
         return "\n".join(lines)
     if entity == "customer":
+        if intent.get("grain") == "cohort_period":
+            if not rows:
+                return "No encontre cohortes suficientes para analizar retencion."
+            lines = [f"Retencion por cohortes para {_period_label(period)}:"]
+            for index, row in enumerate(rows[:10], start=1):
+                label = row.get("cohort_label") or row.get("cohort_date") or "Cohorte"
+                size = row.get("cohort_size")
+                retention = row.get("retention")
+                bits = []
+                if size is not None:
+                    bits.append(f"{size} clientes iniciales")
+                if isinstance(retention, list) and retention:
+                    first = retention[0] if isinstance(retention[0], dict) else {}
+                    pct = first.get("pct") or first.get("retention_pct")
+                    if pct is not None:
+                        bits.append(f"primer periodo {pct}%")
+                lines.append(f"{index}. {label}" + (f" ({', '.join(bits)})" if bits else ""))
+            return "\n".join(lines)
+        if intent.get("grain") == "customer_period_segment":
+            if not rows:
+                return "No encontre clientes suficientes para segmentacion RFM."
+            lines = [f"Segmentacion RFM para {_period_label(period)}:"]
+            for index, row in enumerate(rows[:20], start=1):
+                name = row.get("customer_name") or row.get("customer_id") or "Cliente"
+                segment = row.get("segment") or "segmento sin clasificar"
+                spent = _fmt_money(row.get("total_spent"))
+                orders = row.get("order_count")
+                bits = [str(segment)]
+                if orders is not None:
+                    bits.append(f"{orders} ordenes")
+                if spent:
+                    bits.append(f"{spent} comprado")
+                lines.append(f"{index}. {name} ({', '.join(bits)})")
+            return "\n".join(lines)
+        if intent.get("grain") == "customer_risk":
+            if not rows:
+                return "No encontre clientes en riesgo con los criterios consultados."
+            lines = ["Clientes en riesgo de no volver:"]
+            for index, row in enumerate(rows[:20], start=1):
+                name = row.get("name") or row.get("customer_id") or "Cliente"
+                days = row.get("days_since_last_order")
+                ltv = _fmt_money(row.get("lifetime_value"))
+                risk = row.get("risk_score")
+                bits = []
+                if days is not None:
+                    bits.append(f"{days} dias sin comprar")
+                if ltv:
+                    bits.append(f"LTV {ltv}")
+                if risk is not None:
+                    bits.append(f"riesgo {risk}")
+                lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
+            return "\n".join(lines)
         if not rows:
             return "No encontre clientes suficientes para responder con ranking."
         if "compare" in intent.get("operations", []):
@@ -123,6 +186,36 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
                 bits.append(f"{spent} comprado")
             if avg:
                 bits.append(f"ticket {avg}")
+            lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
+        return "\n".join(lines)
+    if entity == "loyalty_transaction":
+        if not rows and metrics:
+            issued = metrics.get("total_issued") or metrics.get("total_earned")
+            redeemed = metrics.get("total_redeemed")
+            rate = metrics.get("redemption_rate_pct")
+            bits = []
+            if issued is not None:
+                bits.append(f"WAROS emitidos: {issued}")
+            if redeemed is not None:
+                bits.append(f"WAROS redimidos: {redeemed}")
+            if rate is not None:
+                bits.append(f"tasa de redencion: {rate}%")
+            return f"Analitica WAROS para {_period_label(period)}: " + ", ".join(bits)
+        if not rows:
+            return "No encontre datos de WAROS suficientes para responder."
+        lines = [f"Clientes que mas generaron WAROS para {_period_label(period)}:"]
+        for index, row in enumerate(rows[:20], start=1):
+            name = row.get("name") or row.get("customer_name") or row.get("customer_id") or row.get("period") or "Cliente"
+            earned = row.get("total_earned") or row.get("total_issued")
+            redeemed = row.get("total_redeemed")
+            txs = row.get("transaction_count")
+            bits = []
+            if earned is not None:
+                bits.append(f"{earned} WAROS generados")
+            if redeemed is not None:
+                bits.append(f"{redeemed} redimidos")
+            if txs is not None:
+                bits.append(f"{txs} transacciones")
             lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
         return "\n".join(lines)
     return "Tengo datos suficientes, pero no pude generar un resumen especifico para esta consulta."
@@ -176,6 +269,13 @@ def _metrics_from_result(result: dict[str, Any] | None) -> dict[str, Any]:
         "total_revenue": "revenue",
         "margin": "margin",
         "profit_margin_pct": "margin",
+        "total_issued": "total_issued",
+        "total_earned": "total_issued",
+        "total_redeemed": "total_redeemed",
+        "redemption_rate_pct": "redemption_rate_pct",
+        "cohort_size": "cohort_size",
+        "risk_score": "risk_score",
+        "lifetime_value": "lifetime_value",
     }
     for key, normalized in aliases.items():
         if key in source:
@@ -211,6 +311,8 @@ def _ranked_rows(intent: QuestionIntent, tables: list[dict[str, Any]]) -> list[d
             ),
         )
     if intent.entity == "customer":
+        if intent.grain in {"cohort_period", "customer_period_segment", "customer_risk"}:
+            return rows
         key = "order_count" if "order_count" in intent.measures else "total_spent"
         rows = [
             row
@@ -223,6 +325,11 @@ def _ranked_rows(intent: QuestionIntent, tables: list[dict[str, Any]]) -> list[d
                 key=lambda row: (-_number(row.get("order_count")), -_number(row.get("total_spent"))),
             )
         return sorted(rows, key=lambda row: -_number(row.get(key)))
+    if intent.entity == "loyalty_transaction":
+        return sorted(
+            rows,
+            key=lambda row: -_number(row.get("total_earned") or row.get("total_issued")),
+        )
     return rows
 
 
@@ -261,6 +368,191 @@ def _evidence(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"tool": table.get("tool"), "row_count": len(table.get("rows") or []), "metrics": table.get("metrics") or {}}
         for table in tables
     ]
+
+
+def _analysis_from_evidence(
+    intent: QuestionIntent,
+    tables: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    ranked_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    facts: list[str] = []
+    patterns: list[str] = []
+    risks: list[str] = []
+    opportunities: list[str] = []
+    recommended_actions: list[str] = []
+    limitations: list[str] = []
+    profile = profile_for_intent(intent)
+
+    total_sales = metrics.get("total_sales") or metrics.get("totalSales")
+    avg_ticket = metrics.get("avg_ticket") or metrics.get("avgTicket")
+    order_count = metrics.get("order_count") or metrics.get("totalOrders")
+    if total_sales is not None:
+        facts.append(f"Ventas totales observadas: {_fmt_money(total_sales)}.")
+    if avg_ticket is not None:
+        facts.append(f"Ticket promedio observado: {_fmt_money(avg_ticket)}.")
+    if order_count is not None:
+        facts.append(f"Ordenes observadas: {order_count}.")
+
+    if profile is not None:
+        grouped_rows = {
+            group: rows_for_group(tables=tables, profile=profile, group=group)
+            for group in _profile_groups(profile)
+        }
+        if "products" in grouped_rows:
+            grouped_rows["products"] = _merge_product_rows(grouped_rows["products"])
+
+        for signal in profile.signals:
+            _apply_signal(
+                signal=signal,
+                grouped_rows=grouped_rows,
+                patterns=patterns,
+                risks=risks,
+                opportunities=opportunities,
+                recommended_actions=recommended_actions,
+            )
+        for item in profile.missing_evidence_limitations:
+            group = str(item.get("group") or "")
+            message = str(item.get("message") or "")
+            if group and message and not grouped_rows.get(group):
+                limitations.append(message)
+
+    return {
+        "facts": facts,
+        "patterns": patterns,
+        "risks": risks,
+        "opportunities": opportunities,
+        "recommended_actions": recommended_actions,
+        "limitations": limitations,
+        "confidence": "medium" if patterns or facts else "low",
+        "source_tools": [str(table.get("tool")) for table in tables if table.get("tool")],
+    }
+
+
+def _business_analysis_summary(artifact: dict[str, Any], period: str | None) -> str:
+    analysis = artifact.get("analysis") if isinstance(artifact.get("analysis"), dict) else {}
+    facts = _string_items(analysis.get("facts"))
+    patterns = _string_items(analysis.get("patterns"))
+    risks = _string_items(analysis.get("risks"))
+    opportunities = _string_items(analysis.get("opportunities"))
+    actions = _string_items(analysis.get("recommended_actions"))
+    limitations = _string_items(analysis.get("limitations"))
+
+    lines = [f"Analisis del negocio para {_period_label(period)}:"]
+    if facts:
+        lines.append("")
+        lines.append("Datos base:")
+        lines.extend(f"- {item}" for item in facts[:4])
+    if patterns:
+        lines.append("")
+        lines.append("Comportamientos detectados:")
+        lines.extend(f"- {item}" for item in patterns[:5])
+    if risks:
+        lines.append("")
+        lines.append("Riesgos:")
+        lines.extend(f"- {item}" for item in risks[:4])
+    if opportunities:
+        lines.append("")
+        lines.append("Oportunidades:")
+        lines.extend(f"- {item}" for item in opportunities[:4])
+    if actions:
+        lines.append("")
+        lines.append("Acciones recomendadas:")
+        lines.extend(f"- {item}" for item in actions[:5])
+    if limitations:
+        lines.append("")
+        lines.append("Limitaciones:")
+        lines.extend(f"- {item}" for item in limitations[:3])
+    if len(lines) == 1:
+        lines.append("No encontre evidencia suficiente para identificar patrones profundos.")
+    return "\n".join(lines)
+
+
+def _profile_groups(profile) -> set[str]:
+    groups = profile.analysis.get("tool_groups")
+    if not isinstance(groups, dict):
+        return set()
+    return {str(group) for group in groups if group}
+
+
+def _apply_signal(
+    *,
+    signal: dict[str, Any],
+    grouped_rows: dict[str, list[dict[str, Any]]],
+    patterns: list[str],
+    risks: list[str],
+    opportunities: list[str],
+    recommended_actions: list[str],
+) -> None:
+    rows = grouped_rows.get(str(signal.get("group") or ""), [])
+    if not rows:
+        return
+    kind = str(signal.get("kind") or "")
+    matched: list[dict[str, Any]] = []
+    if kind == "threshold_rows":
+        positive_fields = _list(signal.get("positive_field_any"))
+        max_fields = _list(signal.get("max_field_any"))
+        max_value = _number(signal.get("max_value"))
+        for row in rows:
+            threshold_value = first_value(row, max_fields)
+            if threshold_value is None:
+                continue
+            if _number(first_value(row, positive_fields)) > 0 and _number(threshold_value) <= max_value:
+                matched.append(row)
+    elif kind == "name_match":
+        name_fields = _list(signal.get("name_field_any"))
+        values = {normalized_any(item) for item in _list(signal.get("match_values"))}
+        matched = [
+            row
+            for row in rows
+            if normalized_any(first_value(row, name_fields)) in values
+        ]
+    elif kind == "active_rows":
+        positive_fields = _list(signal.get("positive_field_any"))
+        matched = [row for row in rows if _number(first_value(row, positive_fields)) > 0]
+    elif kind == "cohort_retention_threshold":
+        max_value = _number(signal.get("max_value"))
+        for row in rows:
+            retention = row.get("retention")
+            if not isinstance(retention, list) or not retention:
+                continue
+            first = retention[0] if isinstance(retention[0], dict) else {}
+            pct = _number(first.get("pct") or first.get("retention_pct"))
+            if pct and pct < max_value:
+                matched.append(row)
+    if not matched:
+        return
+
+    sample = _sample_text(matched, _list(signal.get("sample_name_any")))
+    context = {"sample": sample}
+    for key, target in (
+        ("pattern", patterns),
+        ("risk", risks),
+        ("opportunity", opportunities),
+        ("recommended_action", recommended_actions),
+    ):
+        message = signal.get(key)
+        if isinstance(message, str) and message:
+            target.append(message.format(**context))
+
+
+def _sample_text(rows: list[dict[str, Any]], fields: list[Any]) -> str:
+    samples = []
+    for row in rows[:3]:
+        value = first_value(row, fields)
+        if value is not None:
+            samples.append(str(value))
+    return ", ".join(samples) if samples else "varias filas"
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _string_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item]
 
 
 def _limitations(plan: ToolPlan, failed: list[dict[str, Any]]) -> list[str]:

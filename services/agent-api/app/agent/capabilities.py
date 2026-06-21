@@ -156,7 +156,11 @@ def _score_capability(
         score += 2
         reasons.append("period")
 
-    accepted = score >= 8 and (bool(measure_hits) or _summary_tool_ok(intent, capability))
+    accepted = score >= 8 and (
+        bool(measure_hits)
+        or _summary_tool_ok(intent, capability)
+        or (intent.entity == "business" and bool(operation_hits))
+    )
     rejected_reason = None if accepted else "missing_required_measure"
     return CapabilityMatch(
         capability=capability,
@@ -195,6 +199,14 @@ def coverage_for_match(intent: QuestionIntent, match: CapabilityMatch) -> set[st
 def _entity_compatible(intent: QuestionIntent, capability: ToolCapability) -> bool:
     if intent.entity == "unknown":
         return True
+    if intent.entity == "business":
+        return capability.entity in {
+            "sale",
+            "order",
+            "product",
+            "customer",
+            "loyalty_transaction",
+        }
     if intent.entity == capability.entity:
         return True
     if intent.entity == "sale" and capability.entity in {"sale", "order"}:
@@ -207,6 +219,16 @@ def _entity_compatible(intent: QuestionIntent, capability: ToolCapability) -> bo
 def _grain_compatible(intent: QuestionIntent, capability: ToolCapability) -> bool:
     if intent.grain == "unknown":
         return True
+    if intent.grain == "business_period":
+        return capability.supports_period or capability.grain in {
+            "period",
+            "period_or_group",
+            "product_period",
+            "customer_period",
+            "customer_period_summary",
+            "cohort_period",
+            "period_or_customer",
+        }
     if intent.grain == capability.grain:
         return True
     if intent.grain == "period" and capability.grain in {"period_or_group", "daily_series"}:
