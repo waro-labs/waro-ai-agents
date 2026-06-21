@@ -54,6 +54,13 @@ CUSTOMER_RANKING_PROFILE = ShapeProfile(
     active_fields=("order_count", "total_spent"),
 )
 
+PRODUCT_RANKING_PROFILE = ShapeProfile(
+    entity="products",
+    allowed_rank_fields=frozenset({"quantity", "revenue", "margin", "cost", "profit"}),
+    default_rank_fields=("quantity",),
+    active_fields=("quantity", "revenue", "profit"),
+)
+
 SPANISH_NUMBER_WORDS = {
     "uno": 1,
     "una": 1,
@@ -1898,7 +1905,7 @@ class SalesWorkflow:
             request_kind=request_kind,
             sort_field=sort_field,
         )
-        operations = self._validated_operations(plan.get("operations"))
+        operations = self.data_shaper.normalize_operations(plan.get("operations"))
         if not operations:
             operations = self._default_analysis_operations(
                 request_kind=request_kind,
@@ -1941,9 +1948,6 @@ class SalesWorkflow:
             return fallback
         return max(1, min(limit, 50))
 
-    def _validated_operations(self, value: Any) -> list[dict[str, Any]]:
-        return self.data_shaper.normalize_operations(value)
-
     def _default_analysis_operations(
         self,
         *,
@@ -1952,30 +1956,21 @@ class SalesWorkflow:
         limit: int,
     ) -> list[dict[str, Any]]:
         if request_kind == "customer_ranking":
-            by = [sort_field] if sort_field else ["total_spent"]
-            if "order_count" not in by:
-                by.append("order_count")
-            if "total_spent" not in by:
-                by.append("total_spent")
-            return [
-                {
-                    "type": "filter",
-                    "condition": "order_count > 0 OR total_spent > 0",
-                },
-                {"type": "rank", "by": by, "direction": "desc"},
-                {"type": "limit", "value": max(1, min(limit, 50))},
-            ]
-        if request_kind == "product_ranking":
-            by = [sort_field] if sort_field else ["quantity"]
-            return [
-                {
-                    "type": "filter",
-                    "condition": "quantity > 0 OR revenue > 0 OR profit > 0",
-                },
-                {"type": "rank", "by": by, "direction": "desc"},
-                {"type": "limit", "value": max(1, min(limit, 50))},
-            ]
-        return []
+            profile = CUSTOMER_RANKING_PROFILE
+        elif request_kind == "product_ranking":
+            profile = PRODUCT_RANKING_PROFILE
+        else:
+            return []
+        fields = self.data_shaper.rank_fields(
+            profile=profile,
+            operations=[],
+            sort_field=sort_field,
+        )
+        return self.data_shaper.default_rank_operations(
+            profile=profile,
+            sort_fields=fields,
+            limit=limit,
+        )
 
     def _guardrail_request_kind(
         self,
@@ -2649,34 +2644,22 @@ class SalesWorkflow:
                 }
                 for row in customer_rows
             ]
-            shaped_customers, execution = self._shape_customer_rows(
+            shaped_result = self.data_shaper.shape_ranked_rows(
                 normalized_customers,
-                semantic_plan=semantic_plan,
+                profile=CUSTOMER_RANKING_PROFILE,
+                operations=semantic_plan.get("operations")
+                if isinstance(semantic_plan, dict)
+                else None,
+                sort_field=str(semantic_plan.get("sort_field"))
+                if isinstance(semantic_plan, dict) and semantic_plan.get("sort_field")
+                else None,
                 limit=customer_limit,
             )
-            context["customers"] = shaped_customers
+            context["customers"] = shaped_result.rows
             context["analysis_execution"] = {
-                "customers": execution,
+                "customers": shaped_result.execution,
             }
         return sanitize_value(context)
-
-    def _shape_customer_rows(
-        self,
-        rows: list[dict[str, Any]],
-        *,
-        semantic_plan: dict[str, Any] | None,
-        limit: int,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        result = self.data_shaper.shape_ranked_rows(
-            rows,
-            profile=CUSTOMER_RANKING_PROFILE,
-            operations=semantic_plan.get("operations") if isinstance(semantic_plan, dict) else None,
-            sort_field=str(semantic_plan.get("sort_field"))
-            if isinstance(semantic_plan, dict) and semantic_plan.get("sort_field")
-            else None,
-            limit=limit,
-        )
-        return result.rows, result.execution
 
     def _customer_rank_fields(self, semantic_plan: dict[str, Any] | None) -> list[str]:
         operations = self.data_shaper.normalize_operations(
