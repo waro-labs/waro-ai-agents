@@ -653,6 +653,7 @@ def _tool_prompt_score(question: str, tool: dict[str, Any]) -> int:
             "abastecimiento",
             "compra",
             "compras",
+            "comprar",
             "proveedor",
             "proveedores",
             "vencimiento",

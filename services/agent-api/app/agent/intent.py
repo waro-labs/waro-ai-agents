@@ -219,11 +219,11 @@ def heuristic_intent(
         dimensions.append("ingredient")
         measures.extend(["current_stock", "minimum_stock"])
         operations.extend(["rank", "filter"])
-        if re.search(r"\b(movimientos?|consumo|consumieron|salidas?|entradas?)\b", normalized):
+        if re.search(r"\b(movimientos?|consumo|consumio|consumieron|salidas?|entradas?)\b", normalized):
             grain = "inventory_movement"
             measures.extend(["net_quantity", "movement_count"])
-    elif re.search(r"\b(abastecimiento|compras?|proveedores?|supplier|purchase)\b", normalized):
-        if re.search(r"\b(proveedores?|supplier)\b", normalized):
+    elif re.search(r"\b(abastecimiento|compras?|comprar|proveedor(?:es)?|supplier|purchase)\b", normalized):
+        if re.search(r"\b(proveedor(?:es)?|supplier)\b", normalized):
             entity = "supplier"
             grain = "supplier_period"
             dimensions.append("supplier")
@@ -291,7 +291,7 @@ def heuristic_intent(
         measures.append("cost")
     if entity in {"ingredient", "inventory"} and re.search(r"\b(stock|existencias?|inventario|bajo)\b", normalized):
         measures.extend(["current_stock", "minimum_stock"])
-    if entity in {"purchase", "supplier", "procurement"} and re.search(r"\b(precio|costo|costos?|subieron?|compras?)\b", normalized):
+    if entity in {"purchase", "supplier", "procurement"} and re.search(r"\b(precio|costo|costos?|subieron?|compras?|comprar)\b", normalized):
         measures.extend(["avg_unit_cost", "total_cost"])
     if re.search(r"\b(mayor valor|mas dinero|compraron|comprado|gasto|spent)\b", normalized):
         measures.append("total_spent" if entity == "customer" else "revenue")

@@ -265,6 +265,12 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
                 bits.append(f"ticket {avg}")
             lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
         return "\n".join(lines)
+    if entity in {"ingredient", "inventory"}:
+        return _inventory_summary(artifact, rows, period)
+    if entity in {"purchase", "supplier", "procurement"}:
+        if strategy == "recommendation" or _asks_for_purchase_recommendation(str(artifact.get("question") or "")):
+            return _procurement_recommendation_summary(artifact, rows, period)
+        return _purchase_summary(artifact, rows, period)
     if entity == "loyalty_transaction":
         if not rows and metrics:
             issued = metrics.get("total_issued") or metrics.get("total_earned")
@@ -351,6 +357,124 @@ def _no_evidence_summary(artifact: dict[str, Any]) -> str:
             "Puedo reformularla como consulta de datos o usar el contexto anterior si aplica."
         )
     return "No tengo evidencia suficiente para responder sin inventar."
+
+
+def _inventory_summary(artifact: dict[str, Any], rows: list[dict[str, Any]], period: str | None) -> str:
+    if not rows:
+        return (
+            "Puedo analizar inventario, pero esta consulta no trajo insumos o movimientos suficientes. "
+            "Prueba con bajo stock, consumo de ingredientes o movimientos de inventario en un periodo."
+        )
+    intent = artifact.get("question_intent") if isinstance(artifact.get("question_intent"), dict) else {}
+    movement_view = intent.get("grain") == "inventory_movement" or any(
+        row.get("net_quantity") is not None or row.get("quantity_out") is not None for row in rows
+    )
+    title = "Consumo de ingredientes" if movement_view else "Inventario de insumos"
+    lines = [f"{title} para {_period_label(period)}:"]
+    for index, row in enumerate(rows[:10], start=1):
+        name = row.get("ingredient") or row.get("ingredient_name") or row.get("name") or "Ingrediente"
+        bits = []
+        if row.get("current_stock") is not None:
+            bits.append(f"stock {row.get('current_stock')}")
+        if row.get("minimum_stock") is not None:
+            bits.append(f"minimo {row.get('minimum_stock')}")
+        if row.get("net_quantity") is not None:
+            bits.append(f"consumo neto {row.get('net_quantity')}")
+        if row.get("quantity_out") is not None:
+            bits.append(f"salidas {row.get('quantity_out')}")
+        if row.get("movement_count") is not None:
+            bits.append(f"{row.get('movement_count')} movimientos")
+        if row.get("unit"):
+            bits.append(str(row.get("unit")))
+        lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
+    limitations = _procurement_limitations(artifact)
+    if limitations:
+        lines.append("")
+        lines.append("Limitaciones:")
+        lines.extend(f"- {item}" for item in limitations[:3])
+    return "\n".join(lines)
+
+
+def _purchase_summary(artifact: dict[str, Any], rows: list[dict[str, Any]], period: str | None) -> str:
+    if not rows:
+        return (
+            "Puedo analizar compras y proveedores, pero esta consulta no trajo compras suficientes. "
+            "Prueba con compras recientes, proveedor, ingrediente o costo unitario en un periodo."
+        )
+    lines = [f"Compras y proveedores para {_period_label(period)}:"]
+    for index, row in enumerate(rows[:10], start=1):
+        supplier = row.get("supplier") or row.get("supplier_name") or "Proveedor"
+        ingredient = row.get("ingredient") or row.get("ingredient_name")
+        label = f"{supplier}" + (f" - {ingredient}" if ingredient else "")
+        bits = []
+        if row.get("avg_unit_cost") is not None:
+            bits.append(f"costo unitario {_fmt_money(row.get('avg_unit_cost')) or row.get('avg_unit_cost')}")
+        if row.get("total_cost") is not None:
+            bits.append(f"total {_fmt_money(row.get('total_cost')) or row.get('total_cost')}")
+        if row.get("quantity_purchased") is not None:
+            bits.append(f"cantidad {row.get('quantity_purchased')}")
+        if row.get("purchase_count") is not None:
+            bits.append(f"{row.get('purchase_count')} compras")
+        lines.append(f"{index}. {label}" + (f" ({', '.join(bits)})" if bits else ""))
+    limitations = _procurement_limitations(artifact)
+    if limitations:
+        lines.append("")
+        lines.append("Limitaciones:")
+        lines.extend(f"- {item}" for item in limitations[:3])
+    return "\n".join(lines)
+
+
+def _procurement_recommendation_summary(
+    artifact: dict[str, Any],
+    rows: list[dict[str, Any]],
+    period: str | None,
+) -> str:
+    lines = [f"Compra sugerida para {_period_label(period)}:"]
+    if rows:
+        lines.append("")
+        lines.append("Evidencia disponible:")
+        for row in rows[:5]:
+            name = row.get("ingredient") or row.get("ingredient_name") or row.get("name") or "Ingrediente"
+            bits = []
+            if row.get("current_stock") is not None:
+                bits.append(f"stock {row.get('current_stock')}")
+            if row.get("minimum_stock") is not None:
+                bits.append(f"minimo {row.get('minimum_stock')}")
+            if row.get("avg_unit_cost") is not None:
+                bits.append(f"costo unitario {_fmt_money(row.get('avg_unit_cost')) or row.get('avg_unit_cost')}")
+            lines.append(f"- {name}" + (f": {', '.join(bits)}." if bits else "."))
+    lines.append("")
+    lines.append(
+        "No emitiria una orden de compra cerrada solo con esta evidencia. "
+        "La usaria como alerta inicial y validaria los datos faltantes antes de comprar."
+    )
+    limitations = _dedupe_text_items(
+        [
+            *_procurement_limitations(artifact),
+            "Falta lead time de proveedores para calcular urgencia.",
+            "Faltan compras pendientes para evitar duplicar abastecimiento.",
+            "Falta demanda esperada o consumo proyectado para estimar cantidad.",
+        ]
+    )
+    lines.append("")
+    lines.append("Limitaciones:")
+    lines.extend(f"- {item}" for item in limitations[:5])
+    return "\n".join(lines)
+
+
+def _asks_for_purchase_recommendation(question: str) -> bool:
+    normalized = question.lower()
+    return any(term in normalized for term in ("deberia comprar", "debería comprar", "que comprar", "qué comprar"))
+
+
+def _procurement_limitations(artifact: dict[str, Any]) -> list[str]:
+    analysis = artifact.get("analysis") if isinstance(artifact.get("analysis"), dict) else {}
+    return _dedupe_text_items(
+        [
+            *_string_items(analysis.get("limitations")),
+            *_string_items(artifact.get("limitations")),
+        ]
+    )
 
 
 def _context_usage(*, question: str, conversation_state: dict[str, Any] | None) -> dict[str, Any]:
@@ -476,6 +600,8 @@ def _normalize_query_row(row: dict[str, Any], metadata: dict[str, Any]) -> dict[
         "customer": "name",
         "customer_name": "name",
         "customer_id": "id",
+        "ingredient": "name",
+        "ingredient_name": "name",
         "quantity_sold": "quantity",
         "total_units_sold": "quantity",
         "total_revenue": "revenue",
@@ -1394,6 +1520,16 @@ def _row_summary_bits(row: dict[str, Any]) -> list[str]:
         bits.append(f"{revenue}")
     if margin is not None:
         bits.append(f"margen {_fmt_percent(margin)}")
+    if row.get("current_stock") is not None:
+        bits.append(f"stock {row.get('current_stock')}")
+    if row.get("minimum_stock") is not None:
+        bits.append(f"minimo {row.get('minimum_stock')}")
+    if row.get("net_quantity") is not None:
+        bits.append(f"consumo neto {row.get('net_quantity')}")
+    if row.get("avg_unit_cost") is not None:
+        bits.append(f"costo unitario {_fmt_money(row.get('avg_unit_cost')) or row.get('avg_unit_cost')}")
+    if row.get("total_cost") is not None:
+        bits.append(f"total {_fmt_money(row.get('total_cost')) or row.get('total_cost')}")
     if row.get("cost_source"):
         bits.append(f"costo {row['cost_source']}")
     return bits
@@ -1421,6 +1557,10 @@ def _row_name(row: dict[str, Any], *, fallback: str) -> str:
         or row.get("product_name")
         or row.get("customer")
         or row.get("customer_name")
+        or row.get("ingredient")
+        or row.get("ingredient_name")
+        or row.get("supplier")
+        or row.get("supplier_name")
         or row.get("id")
         or row.get("product_id")
         or row.get("customer_id")
