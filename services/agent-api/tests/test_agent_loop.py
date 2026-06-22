@@ -21,6 +21,7 @@ from app.agent.strategy import heuristic_answer_strategy
 from app.agent.tool_reasoning import _available_tools, _planning_messages, _queryspec_contract_hint
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
+from app.evals.sales import evaluate_sales_artifact
 from app.llm.base import LLMError, LLMMessage, LLMResponse
 from app.tools.allowlist import TOOL_SPECS
 from app.tools.models import ToolCallResponse
@@ -139,6 +140,72 @@ class RecordingGateway:
             status="succeeded",
             result={"rows": [{"product": "Burger", "revenue": 1000}]},
             result_summary="query ok",
+        )
+
+
+class ProcurementGateway:
+    def __init__(self):
+        self.calls = []
+
+    async def call(self, *, request, context):
+        self.calls.append(request)
+        spec = json.loads(request.arguments["spec"])
+        dataset = spec["dataset"]
+        rows_by_dataset = {
+            "inventory_stock": [
+                {
+                    "ingredient": "Queso mozzarella",
+                    "current_stock": 2,
+                    "minimum_stock": 5,
+                    "unit": "kg",
+                    "status": "low",
+                }
+            ],
+            "inventory_movements": [
+                {
+                    "ingredient": "Harina",
+                    "quantity_out": 18,
+                    "net_quantity": -18,
+                    "movement_count": 7,
+                    "day": "2026-06-20",
+                }
+            ],
+            "purchase_items": [
+                {
+                    "supplier": "Distribuidora Norte",
+                    "ingredient": "Tomate",
+                    "quantity_purchased": 12,
+                    "avg_unit_cost": 4200,
+                    "total_cost": 50400,
+                    "purchase_count": 3,
+                }
+            ],
+        }
+        limitations_by_dataset = {
+            "inventory_movements": ["No incluye mermas no registradas."],
+            "purchase_items": [
+                "Falta lead time de proveedores.",
+                "Faltan compras pendientes.",
+                "Falta demanda esperada.",
+            ],
+        }
+        rows = rows_by_dataset[dataset]
+        result = {
+            "rows": rows,
+            "meta": {
+                "dataset": dataset,
+                "measures": spec["measures"],
+                "dimensions": spec["dimensions"],
+                "row_count": len(rows),
+                "limitations": limitations_by_dataset.get(dataset, []),
+            },
+        }
+        return ToolCallResponse(
+            tool_call_id=uuid4(),
+            tool_name=request.tool_name,
+            status="succeeded",
+            result=result,
+            result_summary=f"{dataset} ok",
         )
 
 
@@ -633,6 +700,10 @@ def _procurement_queries_capability() -> ToolCapability:
             "current_stock",
             "minimum_stock",
             "stock_value",
+            "quantity_in",
+            "quantity_out",
+            "net_quantity",
+            "movement_count",
             "quantity_purchased",
             "total_cost",
             "avg_unit_cost",
@@ -685,6 +756,20 @@ def _queries_schema_payload():
             }
         ],
     }
+
+
+def _procurement_queries_schema_payload():
+    payload = _queries_schema_payload()
+    capability = _procurement_queries_capability()
+    payload["tools"][0]["capabilities"] = capability.planning_hints | {
+        "entity": "query_row",
+        "grain": "dynamic_dataset_row",
+        "measures": list(capability.measures),
+        "dimensions": list(capability.dimensions),
+        "supported_operations": list(capability.operations),
+        "supports_period": True,
+    }
+    return payload
 
 
 def test_capability_matcher_routes_waros_question_to_waros_tool():
@@ -966,6 +1051,18 @@ def test_plan_builds_purchase_query_from_discovered_contract():
     assert spec["dataset"] == "purchase_items"
     assert "supplier" in spec["dimensions"]
     assert {"total_cost", "avg_unit_cost"}.intersection(spec["measures"])
+
+
+def test_plan_builds_purchase_query_for_plain_buy_recommendation():
+    intent = heuristic_intent("Que deberia comprar?")
+    matches = match_tools(intent, [_procurement_queries_capability()], scopes=("analytics:read",))
+    plan = build_tool_plan(intent, matches)
+    spec = json.loads(plan.steps[0].arguments["spec"])
+
+    assert intent.entity == "purchase"
+    assert plan.valid is True
+    assert spec["dataset"] == "purchase_items"
+    assert "sql" not in json.dumps(spec).lower()
 
 
 def test_plan_validator_accepts_customer_frequency_vs_spend_without_revenue():
@@ -2109,6 +2206,70 @@ def test_tool_reasoning_customer_prompt_prefers_customer_tools_without_legacy_da
     assert "waro.financial.products" not in payload["available_tools"]
 
 
+def test_tool_reasoning_procurement_prompt_prefers_query_tools_for_buy_question():
+    tools = {
+        "waro.queries.run": {
+            "name": "waro.queries.run",
+            "description": "Ejecuta QuerySpec analitico",
+            "scope": "analytics:read",
+            "domain": "analytics",
+            "default_fields": ["rows", "meta"],
+            "allowed_fields": ["ingredient", "supplier", "current_stock", "avg_unit_cost"],
+            "arguments_schema": {
+                "type": "object",
+                "required": ["spec"],
+                "properties": {"spec": {"type": "string"}},
+            },
+            "capabilities": {"datasets": ["inventory_stock", "purchase_items"]},
+            "queryspec_contract": _queryspec_contract_hint(
+                query_dataset_rules_from_capability(_procurement_queries_capability())
+            ),
+        },
+        "waro.queries.schema": {
+            "name": "waro.queries.schema",
+            "description": "Lista datasets, medidas y dimensiones de QuerySpec",
+            "scope": "read",
+            "domain": "analytics",
+            "default_fields": ["datasets"],
+            "allowed_fields": ["datasets"],
+            "arguments_schema": {"type": "object", "properties": {}},
+            "capabilities": {"operation": "schema_discovery"},
+        },
+        "waro.sales.metrics": {
+            "name": "waro.sales.metrics",
+            "description": "Metricas de ventas",
+            "scope": "orders:read",
+            "domain": "sales",
+            "default_fields": ["totalSales"],
+            "allowed_fields": ["totalSales"],
+            "arguments_schema": {"type": "object", "properties": {}},
+            "capabilities": {"entity": "sale"},
+        },
+        "waro.financial.products": {
+            "name": "waro.financial.products",
+            "description": "Ranking financiero de productos",
+            "scope": "financial:read",
+            "domain": "financial",
+            "default_fields": ["products"],
+            "allowed_fields": ["products"],
+            "arguments_schema": {"type": "object", "properties": {}},
+            "capabilities": {"entity": "product"},
+        },
+    }
+
+    messages = _planning_messages(
+        question="Que deberia comprar?",
+        tools=tools,
+        conversation_messages=[],
+        observations=[],
+    )
+    payload = json.loads(messages[1].content)
+
+    assert "waro.queries.run" in payload["available_tools"]
+    assert "waro.queries.schema" in payload["available_tools"]
+    assert "waro.sales.metrics" not in payload["available_tools"]
+
+
 @pytest.mark.asyncio
 async def test_tool_reasoning_exposes_query_schema_with_dataset_scope(monkeypatch):
     async def fake_load(self):
@@ -2161,6 +2322,91 @@ async def test_tool_reasoning_exposes_query_schema_with_dataset_scope(monkeypatc
 
     assert "waro.queries.schema" in tools
     assert "waro.queries.run" in tools
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_procurement_questions_use_queryspec_evidence(monkeypatch):
+    async def fake_load(self):
+        return _procurement_queries_schema_payload()
+
+    settings = Settings(TOOL_CATALOG_SOURCE="cli", LLM_PROVIDER="disabled")
+    registry = ToolRegistry(settings)
+    monkeypatch.setattr(ToolRegistry, "_load_cli_schema", fake_load)
+    await registry.refresh(force=True)
+    gateway = ProcurementGateway()
+    loop = AgentLoop(
+        settings=settings,
+        gateway=gateway,
+        registry=registry,
+        llm_adapter=FakeLLM(),
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-procurement-conversation",
+        member_id=None,
+        scopes=("analytics:read",),
+    )
+    cases = [
+        ("Que insumos estan en bajo stock?", "inventory_stock", "Queso mozzarella", "stock 2"),
+        ("Que ingrediente se consumio mas este mes?", "inventory_movements", "Harina", "consumo neto -18"),
+        (
+            "Que proveedor subio mas de precio en compras este mes?",
+            "purchase_items",
+            "Distribuidora Norte",
+            "costo unitario $4.200",
+        ),
+        (
+            "Que deberia comprar?",
+            "purchase_items",
+            "No emitiria una orden de compra cerrada",
+            "Falta lead time",
+        ),
+    ]
+
+    for question, expected_dataset, expected_text, expected_detail in cases:
+        artifact = await loop.run(
+            question=question,
+            context=context,
+            run_id=uuid4(),
+            complexity="simple",
+        )
+        summary = deterministic_evidence_summary(artifact)
+        datasets = {
+            metadata.get("dataset")
+            for metadata in artifact["query_metadata"]
+            if isinstance(metadata, dict)
+        }
+
+        assert artifact["safe_to_answer"] is True
+        assert expected_dataset in datasets
+        assert expected_text in summary
+        assert expected_detail in summary
+        assert "select " not in json.dumps(artifact).lower()
+
+
+def test_procurement_agent_eval_requires_limitations_for_buy_recommendation():
+    artifact = {
+        "agent_mode": True,
+        "question": "Que deberia comprar?",
+        "safe_to_answer": True,
+        "question_intent": {"entity": "purchase"},
+        "observations": [{"tool_name": "waro.queries.run", "status": "succeeded"}],
+        "query_metadata": [{"dataset": "purchase_items"}],
+        "limitations": ["Falta lead time de proveedores."],
+    }
+    evals = evaluate_sales_artifact(artifact)
+    by_name = {item.evaluator_name: item for item in evals}
+
+    assert by_name["procurement_evidence_safety"].passed is True
+    assert by_name["procurement_recommendation_limitations"].passed is True
+
+    artifact["limitations"] = []
+    failed = {
+        item.evaluator_name: item
+        for item in evaluate_sales_artifact(artifact)
+    }
+    assert failed["procurement_recommendation_limitations"].passed is False
 
 
 @pytest.mark.asyncio

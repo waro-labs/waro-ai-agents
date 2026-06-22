@@ -323,6 +323,22 @@ FROM ai.runs
 WHERE id = '<run-id>';
 ```
 
+### Manual procurement questions
+
+Use these signed internal questions to smoke-check Kali procurement coverage:
+
+- `Que insumos estan en bajo stock?`
+- `Que ingrediente se consumio mas este mes?`
+- `Que proveedor subio mas de precio en compras este mes?`
+- `Que deberia comprar?`
+
+For each run, verify Phoenix shows the selected tool, `waro.queries.dataset`,
+`waro.queries.schema_source`, span latency, and LLM token/cost metadata. The
+purchase recommendation question must include limitations for missing lead time,
+pending purchases, minimum stock, or demand evidence before suggesting a buy.
+Do not copy prompt text, user message text, assistant completion text, or raw LLM
+messages into Phoenix attributes.
+
 ## Internal boundary
 
 `GET /health` is the only unauthenticated runtime endpoint. `/internal/ai/*`
