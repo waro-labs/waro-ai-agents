@@ -104,6 +104,7 @@ async def test_tool_registry_merges_dynamic_cli_tool(monkeypatch):
     snapshot = await registry.refresh(force=True)
     assert snapshot.source == "cli"
     assert "waro.inventory.stock" in snapshot.tools
+    assert snapshot.tools["waro.inventory.stock"].domain == "inventory"
     assert "waro.sales.metrics" in snapshot.tools
 
 

@@ -19,6 +19,7 @@ from app.tools import ToolCallRequest, ToolGateway
 from app.tools.catalog import normalize_query
 from app.tools.registry import ToolRegistry
 from app.tools.sanitize import sanitize_value
+from app.agent.queryspec import DATASET_RULES, QueryDatasetRule, query_dataset_rules_from_capability
 
 
 MAX_TOOL_CALLS = 4
@@ -240,7 +241,7 @@ async def _available_tools(*, registry: ToolRegistry, scopes: tuple[str, ...]) -
     scope_set = set(scopes)
     result = {}
     for name, spec in snapshot.tools.items():
-        if spec.scope not in scope_set:
+        if not _tool_scope_allowed(tool_name=name, scope=spec.scope, scopes=scope_set):
             continue
         schema = snapshot.schemas.get(name)
         arguments_schema = (
@@ -261,7 +262,9 @@ async def _available_tools(*, registry: ToolRegistry, scopes: tuple[str, ...]) -
             "capabilities": dict(spec.capabilities),
         }
         if name == "waro.queries.run":
-            result[name]["queryspec_contract"] = _queryspec_contract_hint()
+            result[name]["queryspec_contract"] = _queryspec_contract_hint(
+                query_dataset_rules_from_capability(spec) or DATASET_RULES
+            )
     return result
 
 
@@ -298,53 +301,50 @@ def _queryspec_arguments_schema() -> dict[str, Any]:
     }
 
 
-def _queryspec_contract_hint() -> dict[str, Any]:
+def _queryspec_contract_hint(rules: dict[str, QueryDatasetRule] | None = None) -> dict[str, Any]:
+    rules = rules or DATASET_RULES
+    datasets: dict[str, dict[str, Any]] = {}
+    for name, rule in rules.items():
+        datasets[name] = {
+            "dimensions": sorted(rule.dimensions),
+            "measures": sorted(rule.measures),
+            "filters": sorted(rule.filters),
+            "sortable_fields": sorted(rule.sortable_fields),
+        }
+    if "product_profitability" in datasets:
+        datasets["product_profitability"]["example_spec"] = {
+            "dataset": "product_profitability",
+            "measures": [
+                "quantity_sold",
+                "profit_margin_pct",
+                "profit_margin_real_pct",
+                "revenue",
+            ],
+            "dimensions": ["product"],
+            "filters": {"date_range": {"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}},
+            "order_by": [{"field": "quantity_sold", "direction": "desc"}],
+            "limit": 20,
+        }
+    if "customers" in datasets:
+        datasets["customers"]["example_spec"] = {
+            "dataset": "customers",
+            "measures": ["order_count", "total_spent", "avg_ticket", "last_order_date"],
+            "dimensions": ["customer"],
+            "filters": {"date_range": {"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}},
+            "order_by": [{"field": "order_count", "direction": "desc"}],
+            "limit": 20,
+        }
     return {
         "preferred_for": [
             "productos mas vendidos con margen real",
             "rentabilidad por producto",
             "clientes genericos e impacto por cliente",
             "metricas donde se necesita cruzar ventas con margen/costo",
+            "inventario, bajo stock, insumos, ingredientes y vencimientos",
+            "compras, proveedores y abastecimiento por QuerySpec",
         ],
-        "datasets": {
-            "product_profitability": {
-                "dimensions": ["product", "product_id", "category"],
-                "measures": [
-                    "quantity_sold",
-                    "revenue",
-                    "profit_margin_pct",
-                    "profit_margin_real_pct",
-                    "profit_margin_operativo_pct",
-                    "total_profit",
-                    "profit_per_unit",
-                ],
-                "sortable_fields": [
-                    "quantity_sold",
-                    "revenue",
-                    "profit_margin_pct",
-                    "profit_margin_real_pct",
-                    "total_profit",
-                ],
-                "example_spec": {
-                    "dataset": "product_profitability",
-                    "measures": [
-                        "quantity_sold",
-                        "profit_margin_pct",
-                        "profit_margin_real_pct",
-                        "revenue",
-                    ],
-                    "dimensions": ["product"],
-                    "filters": {"date_range": {"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}},
-                    "order_by": [{"field": "quantity_sold", "direction": "desc"}],
-                    "limit": 20,
-                },
-            },
-            "customer_value": {
-                "dimensions": ["customer", "customer_id"],
-                "measures": ["orders_count", "total_spent", "avg_ticket", "last_order_date"],
-                "sortable_fields": ["orders_count", "total_spent", "avg_ticket"],
-            },
-        },
+        "rule": "Usa solo datasets listados en este contrato o descubiertos con waro.queries.schema; no inventes nombres de datasets.",
+        "datasets": datasets,
     }
 
 
@@ -376,6 +376,8 @@ def _planning_messages(
                 "Interpreta 'ultimo año' como los ultimos 12 meses cerrando en current_date. "
                 "Para productos mas vendidos con margen o rentabilidad, prefiere waro.queries.run con dataset product_profitability. "
                 "Usa waro.financial.products solo si waro.queries.run no esta disponible o falla. "
+                "Para clientes frecuentes o genericos usa dataset customers o las tools waro.customers.*; nunca uses datasets no listados. "
+                "Si no estas seguro del dataset o campo, llama waro.queries.schema antes de waro.queries.run. "
                 "Si el usuario pide clientes genericos, busca evidencia de clientes o ventas por cliente si existe. "
                 "Si el usuario pide causas, compara hipotesis de precio, costo y calidad de datos usando observaciones previas."
             ),
@@ -625,15 +627,51 @@ def _tool_prompt_score(question: str, tool: dict[str, Any]) -> int:
             "margen",
             "margenes",
             "rentabilidad",
+        )
+    )
+    customer_question = any(
+        term in normalized_question
+        for term in (
             "generico",
             "genericos",
             "cliente",
             "clientes",
+            "frecuente",
+            "frecuentes",
+            "recompra",
         )
     )
-    if tool.get("name") == "waro.queries.run" and product_or_margin_question:
+    procurement_question = any(
+        term in normalized_question
+        for term in (
+            "inventario",
+            "stock",
+            "insumo",
+            "insumos",
+            "ingrediente",
+            "ingredientes",
+            "abastecimiento",
+            "compra",
+            "compras",
+            "proveedor",
+            "proveedores",
+            "vencimiento",
+            "vencimientos",
+            "receta",
+            "recetas",
+        )
+    )
+    if tool.get("name") == "waro.queries.run" and (product_or_margin_question or customer_question):
         score += 8
+    if tool.get("name") == "waro.queries.run" and procurement_question:
+        score += 8
+    if tool.get("name") == "waro.queries.schema" and customer_question:
+        score += 5
+    if tool.get("name") == "waro.queries.schema" and procurement_question:
+        score += 5
     if tool.get("name") == "waro.financial.products" and product_or_margin_question:
+        score += 7
+    if tool.get("name") in {"waro.customers.list", "waro.customers.metrics"} and customer_question:
         score += 7
     if tool.get("domain") == "sales" and any(
         term in normalized_question for term in ("venta", "ventas", "ingreso", "ingresos", "ticket")
@@ -643,7 +681,15 @@ def _tool_prompt_score(question: str, tool: dict[str, Any]) -> int:
         term in normalized_question for term in ("food", "costo", "costos", "churn", "cohorte", "rfm")
     ):
         score += 4
+    if tool.get("domain") in {"inventory", "purchases", "suppliers", "procurement"} and procurement_question:
+        score += 7
     return score
+
+
+def _tool_scope_allowed(*, tool_name: str, scope: str, scopes: set[str]) -> bool:
+    if scope in scopes:
+        return True
+    return tool_name == "waro.queries.schema" and scope == "read" and "dataset_scope" in scopes
 
 
 def _compact_tool_for_prompt(tool: dict[str, Any]) -> dict[str, Any]:

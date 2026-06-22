@@ -18,6 +18,8 @@ from app.agent.plan import ToolPlan, build_tool_plan
 from app.agent.queryspec import (
     QuerySpecValidationError,
     is_query_tool,
+    query_dataset_rule_source,
+    query_dataset_rules_for_capability,
     query_trace_attributes_from_args,
     validate_queryspec_payload,
 )
@@ -197,14 +199,22 @@ class AgentLoop:
                 )
                 continue
             if is_query_tool(step.tool_name):
+                query_rules = query_dataset_rules_for_capability(spec)
+                query_source = query_dataset_rule_source(spec)
+                if span is not None:
+                    span.set_attribute("waro.tool.selected", step.tool_name)
+                    span.set_attribute("waro.tool.domain", str(spec.domain))
+                    span.set_attribute("waro.queries.schema_source", query_source)
                 try:
-                    validate_queryspec_payload(step.arguments.get("spec"))
+                    validate_queryspec_payload(step.arguments.get("spec"), rules=query_rules)
                 except QuerySpecValidationError as exc:
                     if span is not None:
                         for key, value in query_trace_attributes_from_args(
                             step.arguments,
                             valid=False,
                             rejected_reason=exc.reason,
+                            rules=query_rules,
+                            source=query_source,
                         ).items():
                             span.set_attribute(key, value)
                     observations.append(
@@ -227,6 +237,8 @@ class AgentLoop:
                     for key, value in query_trace_attributes_from_args(
                         step.arguments,
                         valid=True,
+                        rules=query_rules,
+                        source=query_source,
                     ).items():
                         span.set_attribute(key, value)
             try:

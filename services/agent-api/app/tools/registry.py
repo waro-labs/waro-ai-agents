@@ -23,7 +23,19 @@ from app.tools.schema_v2 import (
 from app.tools.sanitize import sanitize_text
 
 
-DomainName = Literal["sales", "food_cost", "menu", "financial", "analytics", "customers"]
+DomainName = Literal[
+    "sales",
+    "food_cost",
+    "menu",
+    "financial",
+    "analytics",
+    "customers",
+    "inventory",
+    "purchases",
+    "suppliers",
+    "procurement",
+    "queries",
+]
 
 
 class DynamicToolArgs(ToolArgs):
@@ -49,6 +61,11 @@ def agent_schema_to_tool_spec(schema: AgentToolSchema, *, static_spec: ToolSpec 
         "financial",
         "analytics",
         "customers",
+        "inventory",
+        "purchases",
+        "suppliers",
+        "procurement",
+        "queries",
     } else "analytics"
     allowed = schema.allowed_fields or frozenset(schema.default_fields) or frozenset({"data", "meta", "success"})
     return ToolSpec(

@@ -27,6 +27,11 @@ KNOWN_ENTITIES = {
     "loyalty_transaction",
     "loyalty_balance",
     "loyalty_customer",
+    "ingredient",
+    "inventory",
+    "purchase",
+    "supplier",
+    "procurement",
     "unknown",
 }
 KNOWN_GRAINS = {
@@ -42,6 +47,10 @@ KNOWN_GRAINS = {
     "order",
     "daily_series",
     "business_period",
+    "inventory_snapshot",
+    "inventory_movement",
+    "purchase_period",
+    "supplier_period",
     "unknown",
 }
 KNOWN_OPERATIONS = {
@@ -201,6 +210,29 @@ def heuristic_intent(
         )
         dimensions.extend(["date", "product", "customer", "cohort"])
         operations.extend(["summarize", "diagnose", "compare", "rank"])
+    elif re.search(
+        r"\b(inventario|stock|existencias?|insumos?|ingredientes?|bajo stock|vencimientos?)\b",
+        normalized,
+    ):
+        entity = "ingredient"
+        grain = "inventory_snapshot"
+        dimensions.append("ingredient")
+        measures.extend(["current_stock", "minimum_stock"])
+        operations.extend(["rank", "filter"])
+        if re.search(r"\b(movimientos?|consumo|consumieron|salidas?|entradas?)\b", normalized):
+            grain = "inventory_movement"
+            measures.extend(["net_quantity", "movement_count"])
+    elif re.search(r"\b(abastecimiento|compras?|proveedores?|supplier|purchase)\b", normalized):
+        if re.search(r"\b(proveedores?|supplier)\b", normalized):
+            entity = "supplier"
+            grain = "supplier_period"
+            dimensions.append("supplier")
+        else:
+            entity = "purchase"
+            grain = "purchase_period"
+        dimensions.append("ingredient")
+        measures.extend(["quantity_purchased", "total_cost", "avg_unit_cost", "purchase_count"])
+        operations.extend(["rank", "filter"])
     elif re.search(r"\b(waros?|puntos?|redencion|redenciones|fidelidad|loyalty)\b", normalized):
         entity = "loyalty_transaction"
         grain = "period_or_customer"
@@ -234,7 +266,7 @@ def heuristic_intent(
         entity = "customer"
         grain = "customer_period"
         dimensions.append("customer")
-    if entity != "business" and re.search(r"\b(productos?|items?|platos?|menu)\b", normalized):
+    if entity not in {"business", "ingredient", "inventory", "purchase", "supplier", "procurement"} and re.search(r"\b(productos?|items?|platos?|menu)\b", normalized):
         entity = "product"
         grain = "product_period"
         dimensions.append("product")
@@ -257,6 +289,10 @@ def heuristic_intent(
         measures.append("margin")
     if re.search(r"\b(costo|cost|food cost)\b", normalized):
         measures.append("cost")
+    if entity in {"ingredient", "inventory"} and re.search(r"\b(stock|existencias?|inventario|bajo)\b", normalized):
+        measures.extend(["current_stock", "minimum_stock"])
+    if entity in {"purchase", "supplier", "procurement"} and re.search(r"\b(precio|costo|costos?|subieron?|compras?)\b", normalized):
+        measures.extend(["avg_unit_cost", "total_cost"])
     if re.search(r"\b(mayor valor|mas dinero|compraron|comprado|gasto|spent)\b", normalized):
         measures.append("total_spent" if entity == "customer" else "revenue")
 
@@ -291,6 +327,10 @@ def heuristic_intent(
         measures.extend(["quantity_sold", "revenue"])
     if entity == "customer" and not measures:
         measures.extend(["total_spent", "order_count"])
+    if entity in {"ingredient", "inventory"} and not measures:
+        measures.extend(["current_stock", "minimum_stock"])
+    if entity in {"purchase", "supplier", "procurement"} and not measures:
+        measures.extend(["total_cost", "purchase_count"])
     if entity == "business":
         requires_cross_tool = True
 
@@ -488,6 +528,13 @@ def _intent_has_weak_entity_signal(intent: QuestionIntent, question: str) -> boo
         "cohorte",
         "cohortes",
         "negocio",
+        "inventario",
+        "stock",
+        "insumo",
+        "ingrediente",
+        "compra",
+        "proveedor",
+        "abastecimiento",
     )
     return intent.entity in {"sale", "unknown"} and not any(token in normalized for token in explicit_domains)
 
@@ -545,6 +592,17 @@ def normalize_measure(value: str) -> str:
         "r_score": "r_score",
         "f_score": "f_score",
         "m_score": "m_score",
+        "stock": "current_stock",
+        "current_stock": "current_stock",
+        "minimum_stock": "minimum_stock",
+        "low_stock": "minimum_stock",
+        "quantity_purchased": "quantity_purchased",
+        "purchase_count": "purchase_count",
+        "avg_unit_cost": "avg_unit_cost",
+        "unit_cost": "avg_unit_cost",
+        "total_cost": "total_cost",
+        "movement_count": "movement_count",
+        "net_quantity": "net_quantity",
     }
     return aliases.get(normalized, normalized)
 
