@@ -45,6 +45,11 @@ class KimiAdapter:
             ) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:1000] if exc.response is not None else ""
+            raise LLMError(
+                f"Kimi completion request failed: {exc.response.status_code} {body}"
+            ) from exc
         except httpx.HTTPError as exc:
             raise LLMError("Kimi completion request failed.") from exc
 
@@ -105,6 +110,11 @@ class KimiAdapter:
                         if text:
                             content_parts.append(text)
                             yield LLMStreamChunk(text=text)
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:1000] if exc.response is not None else ""
+            raise LLMError(
+                f"Kimi streaming completion request failed: {exc.response.status_code} {body}"
+            ) from exc
         except httpx.HTTPError as exc:
             raise LLMError("Kimi streaming completion request failed.") from exc
 
@@ -130,14 +140,18 @@ class KimiAdapter:
         temperature: float,
         model: str,
     ) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": message.role, "content": message.content}
                 for message in messages
             ],
-            "temperature": temperature,
         }
+        if model in {"kimi-k2.5", "kimi-k2.6"}:
+            payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["temperature"] = temperature
+        return payload
 
     def _headers(self) -> dict[str, str]:
         return {

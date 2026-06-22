@@ -4,13 +4,17 @@ from uuid import uuid4
 
 import pytest
 
+from app.agent.advisor_state import merge_advisor_state
+from app.agent.analyst import analyze_agent_artifact
 from app.agent.classifier import classify_complexity, heuristic_complexity
 from app.agent.capabilities import ToolCapability, capability_from_spec, match_tools
+from app.agent.composer import compose_agent_summary
 from app.agent.conversation import _state_from_artifact
+from app.agent.conversation_planner import heuristic_conversation_plan, plan_conversation
 from app.agent.evidence import build_evidence_artifact, deterministic_evidence_summary
 from app.agent.intent import coerce_intent, heuristic_intent, parse_question_intent, resolve_contextual_intent
 from app.agent.loop import AgentLoop
-from app.agent.plan import ToolPlanStep, build_tool_plan
+from app.agent.plan import ToolPlan, ToolPlanStep, build_tool_plan
 from app.agent.profiles import profile_for_intent, rows_for_group
 from app.agent.strategy import heuristic_answer_strategy
 from app.config import Settings
@@ -50,6 +54,43 @@ class IntentLLM:
 
     async def complete(self, *, messages, temperature=0.2, model=None):
         return LLMResponse(content=json.dumps(self.payload), model=model or "test", provider="kimi")
+
+
+class ToolReasoningLLM:
+    provider = "kimi"
+
+    def __init__(self):
+        self.calls = []
+
+    async def complete(self, *, messages, temperature=0.2, model=None):
+        self.calls.append(messages)
+        system = messages[0].content if messages else ""
+        if "clasificador" in system.lower() or "clasifica" in system.lower():
+            return LLMResponse(
+                content=json.dumps({"complexity": "simple", "reason": "test", "estimated_tool_calls": 1}),
+                model=model or "test",
+                provider="kimi",
+            )
+        if "Devuelve SOLO JSON valido" in system:
+            if not any("observations" in message.content and "metrics ok" in message.content for message in messages):
+                return LLMResponse(
+                    content=json.dumps(
+                        {
+                            "action": "call_tool",
+                            "tool_name": "waro.sales.metrics",
+                            "arguments": {},
+                            "fields": ["summary"],
+                        }
+                    ),
+                    model=model or "test",
+                    provider="kimi",
+                )
+            return LLMResponse(content=json.dumps({"action": "answer"}), model=model or "test", provider="kimi")
+        return LLMResponse(
+            content="Respuesta conversacional desde herramienta, sin resumen deterministico.",
+            model=model or "test",
+            provider="kimi",
+        )
 
 
 class FakeGateway:
@@ -114,9 +155,103 @@ class FailingLLM:
         raise LLMError("Kimi completion request failed.")
 
 
+class AdvisorLLM:
+    provider = "kimi"
+
+    async def complete(self, *, messages, temperature=0.2, model=None):
+        system = messages[0].content if messages else ""
+        if "Analiza SOLO la evidencia JSON" in system:
+            payload = {
+                "direct_answer": "Los productos lideres tienen margen sospechoso.",
+                "diagnosis": ["El costo registrado supera el precio en productos de alto volumen."],
+                "data_quality_notes": ["Validar costo cargado antes de concluir perdida real."],
+                "business_risks": ["Empujar volumen sin revisar costo puede destruir margen."],
+                "recommended_actions": ["Auditar costo y receta de los productos lideres."],
+                "follow_up_questions": ["Quieres separar margen sano vs costo sospechoso?"],
+                "advisor_state_update": {
+                    "active_topic": "product_profitability",
+                    "hypotheses": ["costs_may_be_misconfigured"],
+                    "known_data_issues": ["negative_margin_due_to_cost_gt_price"],
+                    "next_steps": ["audit_top_product_costs"],
+                },
+                "confidence": "medium",
+            }
+            return LLMResponse(content=json.dumps(payload), model=model or "test", provider="kimi")
+        if "Decide la estrategia" in system:
+            return LLMResponse(
+                content=json.dumps(
+                    {
+                        "type": "ranking",
+                        "objective": "Responder ranking con lectura experta.",
+                        "use_previous_artifact": False,
+                        "avoid_repeating": False,
+                        "reasoning_focus": ["quantity_sold", "margin"],
+                        "confidence": 0.8,
+                    }
+                ),
+                model=model or "test",
+                provider="kimi",
+            )
+        if "Redacta la respuesta final" in system:
+            return LLMResponse(content="Resumen experto.", model=model or "test", provider="kimi")
+        return LLMResponse(
+            content=json.dumps({"complexity": "complex", "reason": "advisor", "estimated_tool_calls": 1}),
+            model=model or "test",
+            provider="kimi",
+        )
+
+
+class MetaConversationLLM:
+    provider = "kimi"
+
+    async def complete(self, *, messages, temperature=0.2, model=None):
+        system = messages[0].content if messages else ""
+        if "conversation planner" in system:
+            payload = {
+                "intent_type": "definition",
+                "context_dependency": "none",
+                "subject": "kali_capabilities",
+                "reuse_previous_artifact": False,
+                "preserve_dataset": None,
+                "required_evidence": [],
+                "tool_policy": "reuse_only",
+                "answer_contract": {
+                    "must_explain": ["conversation", "analytics_capabilities", "ask_follow_ups"],
+                    "must_not": ["query_database", "invent_metrics"],
+                    "style": "conversational_analyst",
+                },
+                "confidence": 0.91,
+            }
+            return LLMResponse(content=json.dumps(payload), model=model or "test", provider="kimi")
+        if "Redacta la respuesta final" in system:
+            return LLMResponse(
+                content="Si, puedo conversar contigo y sostener contexto mientras analizamos datos con evidencia.",
+                model=model or "test",
+                provider="kimi",
+            )
+        return LLMResponse(
+            content=json.dumps({"complexity": "simple", "reason": "meta", "estimated_tool_calls": 0}),
+            model=model or "test",
+            provider="kimi",
+        )
+
+
 @pytest.mark.asyncio
 async def test_heuristic_complexity_simple():
     assert heuristic_complexity("dame las ventas de ayer") == "simple"
+
+
+def test_agent_mode_defaults_to_react():
+    assert Settings().agent_mode == "react"
+
+
+def test_old_agent_modes_are_not_valid_runtime_modes():
+    old_batch_mode = "leg" + "acy"
+    old_compare_mode = "sha" + "dow"
+    with pytest.raises(ValueError):
+        Settings(AGENT_MODE=old_batch_mode)
+    with pytest.raises(ValueError):
+        Settings(AGENT_MODE=old_compare_mode)
 
 
 @pytest.mark.asyncio
@@ -318,6 +453,96 @@ def test_answer_strategy_business_follow_up_is_diagnosis_not_comparison():
     )
     assert strategy.type == "diagnosis"
     assert strategy.avoid_repeating is True
+
+
+def test_merge_advisor_state_preserves_previous_and_adds_update():
+    state = merge_advisor_state(
+        previous={
+            "active_topic": "customers",
+            "hypotheses": ["generic_customer_concentration"],
+            "known_data_issues": [],
+            "next_steps": ["separate_generic_customers"],
+        },
+        update={
+            "active_topic": "product_profitability",
+            "hypotheses": ["costs_may_be_misconfigured"],
+            "known_data_issues": ["negative_margin_due_to_cost_gt_price"],
+            "next_steps": ["audit_top_product_costs"],
+        },
+    )
+    assert state["active_topic"] == "product_profitability"
+    assert state["hypotheses"] == ["generic_customer_concentration", "costs_may_be_misconfigured"]
+    assert state["known_data_issues"] == ["negative_margin_due_to_cost_gt_price"]
+    assert state["next_steps"] == ["separate_generic_customers", "audit_top_product_costs"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_agent_artifact_returns_structured_advisor_analysis():
+    intent = heuristic_intent("productos mas vendidos y margen")
+    artifact = build_evidence_artifact(
+        question="productos mas vendidos y margen",
+        intent=intent,
+        plan=build_tool_plan(
+            intent,
+            match_tools(
+                intent,
+                [capability_from_spec(TOOL_SPECS["waro.financial.products"])],
+                scopes=("financial:read",),
+            ),
+        ),
+        observations=[
+            {
+                "tool_name": "waro.financial.products",
+                "status": "succeeded",
+                "result": {"products": [{"name": "Burger", "quantity": 50, "margin": -20}]},
+            }
+        ],
+    )
+    analysis = await analyze_agent_artifact(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test"),
+        llm_adapter=AdvisorLLM(),
+        artifact=artifact,
+        complexity="complex",
+    )
+    assert analysis is not None
+    assert analysis["direct_answer"].startswith("Los productos")
+    assert analysis["advisor_state_update"]["active_topic"] == "product_profitability"
+
+
+@pytest.mark.asyncio
+async def test_compose_agent_summary_keeps_advisor_voice_when_llm_omits_numbers():
+    class ComposerOnlyLLM:
+        provider = "kimi"
+
+        async def complete(self, *, messages, temperature=0.2, model=None):
+            assert "deterministic_summary" in messages[1].content
+            return LLMResponse(
+                content="Veo una alerta clara: los productos lideres venden mucho, pero el margen luce sospechoso.",
+                model=model or "test",
+                provider="kimi",
+            )
+
+    artifact = {
+        "safe_to_answer": True,
+        "answer_strategy": {"type": "ranking"},
+        "advisor_analysis": {
+            "diagnosis": ["El costo registrado supera el precio en productos de alto volumen."],
+            "data_quality_notes": ["Validar costo cargado antes de concluir perdida real."],
+            "business_risks": [],
+            "recommended_actions": ["Auditar costo y receta de los productos lideres."],
+        },
+    }
+    fallback = "Productos por unidades vendidas, margen para ultimo año:\n1. HOT DOG SENCILLO (1131 unidades, $8.741.500 vendido, margen -401.4%)"
+    summary = await compose_agent_summary(
+        settings=Settings(LLM_PROVIDER="kimi", KIMI_API_KEY="test"),
+        llm_adapter=ComposerOnlyLLM(),
+        artifact=artifact,
+        complexity="complex",
+        fallback=fallback,
+    )
+    assert summary.startswith("Veo una alerta clara")
+    assert "HOT DOG SENCILLO" in summary
+    assert "Auditar costo" in summary
 
 
 def _dynamic_capability(
@@ -626,6 +851,7 @@ def test_plan_prefers_queries_for_product_sales_with_margin():
     assert "quantity_sold" in spec["measures"]
     assert "profit_margin_pct" in spec["measures"]
     assert "product" in spec["dimensions"]
+    assert "cost_source" in spec["dimensions"]
     assert "sql" not in json.dumps(spec).lower()
 
 
@@ -660,6 +886,7 @@ def test_plan_uses_queries_for_contextual_product_margin_follow_up():
     assert plan.steps[0].tool_name == "waro.queries.run"
     assert spec["dataset"] == "product_profitability"
     assert "profit_margin_pct" in spec["measures"]
+    assert "cost_source" in spec["dimensions"]
 
 
 def test_plan_validator_accepts_customer_frequency_vs_spend_without_revenue():
@@ -790,6 +1017,371 @@ def test_product_follow_up_margin_uses_previous_ranked_rows_when_current_rows_mi
     assert "margen 12%" in summary
 
 
+def test_conversation_planner_reuses_product_profitability_for_margin_diagnosis():
+    intent = resolve_contextual_intent(
+        heuristic_intent("por qué algunos márgenes salen negativos"),
+        question="por qué algunos márgenes salen negativos",
+        conversation_state={
+            "source": "artifact",
+            "active_entity": "product",
+            "active_grain": "product_period",
+            "last_artifact": {
+                "query_metadata": [{"dataset": "product_profitability"}],
+                "ranked_rows": [
+                    {
+                        "name": "HOT DOG SENCILLO",
+                        "quantity": 1131,
+                        "revenue": 8741500,
+                        "margin": -401.4,
+                        "cost_source": "real",
+                    }
+                ],
+            },
+        },
+    )
+    plan = heuristic_conversation_plan(
+        question="por qué algunos márgenes salen negativos",
+        intent=intent,
+        conversation_state={
+            "source": "artifact",
+            "active_entity": "product",
+            "last_artifact": {
+                "query_metadata": [{"dataset": "product_profitability"}],
+                "ranked_rows": [
+                    {
+                        "name": "HOT DOG SENCILLO",
+                        "quantity": 1131,
+                        "revenue": 8741500,
+                        "margin": -401.4,
+                        "cost_source": "real",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert plan.intent_type == "diagnosis"
+    assert plan.reuse_previous_artifact is True
+    assert plan.tool_policy == "reuse_only"
+    assert plan.preserve_dataset == "product_profitability"
+
+
+def test_heuristic_conversation_planner_handles_agent_capability_questions():
+    intent = heuristic_intent("puedes conversar?")
+    plan = heuristic_conversation_plan(
+        question="puedes conversar?",
+        intent=intent,
+        conversation_state={},
+    )
+
+    assert plan.subject == "kali_capabilities"
+    assert plan.intent_type == "definition"
+    assert plan.tool_policy == "reuse_only"
+
+
+@pytest.mark.asyncio
+async def test_llm_conversation_planner_handles_meta_conversation_without_tools():
+    intent = heuristic_intent("puedes conversar?")
+    plan = await plan_conversation(
+        settings=Settings(LLM_PROVIDER="kimi"),
+        llm_adapter=MetaConversationLLM(),
+        question="puedes conversar?",
+        intent=intent,
+        conversation_state={},
+        capability_hints=[],
+        complexity="simple",
+    )
+
+    assert plan.source == "llm"
+    assert plan.intent_type == "definition"
+    assert plan.subject == "kali_capabilities"
+    assert plan.tool_policy == "reuse_only"
+
+
+def test_meta_conversation_summary_does_not_require_data_or_become_analytics_context():
+    intent = heuristic_intent("puedes conversar?")
+    conversation_plan = {
+        "intent_type": "definition",
+        "context_dependency": "none",
+        "subject": "kali_capabilities",
+        "reuse_previous_artifact": False,
+        "required_evidence": [],
+        "tool_policy": "reuse_only",
+        "answer_contract": {"must_explain": ["conversation"], "must_not": ["query_database"]},
+    }
+    artifact = build_evidence_artifact(
+        question="puedes conversar?",
+        intent=intent,
+        plan=ToolPlan(
+            steps=(),
+            coverage=(),
+            missing_coverage=(),
+            valid=True,
+        ),
+        observations=[],
+        conversation_plan=conversation_plan,
+    )
+    artifact["answer_strategy"] = {"type": "explanation"}
+    summary = deterministic_evidence_summary(artifact)
+    state = _state_from_artifact(
+        artifact={**artifact, "summary": summary},
+        last_question="puedes conversar?",
+        last_summary=summary,
+    )
+
+    assert artifact["safe_to_answer"] is True
+    assert "puedo conversar" in summary.lower()
+    assert "No encontre una plantilla" not in summary
+    assert state.source == "messages"
+    assert state.last_artifact is None
+
+
+def test_no_evidence_summary_never_returns_template_failure():
+    intent = heuristic_intent("puedes conversar?")
+    artifact = build_evidence_artifact(
+        question="puedes conversar?",
+        intent=intent,
+        plan=ToolPlan(
+            steps=(),
+            coverage=(),
+            missing_coverage=(),
+            valid=True,
+        ),
+        observations=[],
+        conversation_plan={
+            "intent_type": "metric_lookup",
+            "context_dependency": "none",
+            "reuse_previous_artifact": False,
+            "tool_policy": "auto",
+        },
+    )
+    artifact["safe_to_answer"] = True
+    artifact["answer_strategy"] = {"type": "explanation"}
+    summary = deterministic_evidence_summary(artifact)
+
+    assert "No encontre una plantilla" not in summary
+    assert "Puedo ayudarte" in summary
+
+
+def test_empty_product_rows_explain_next_step_without_template_failure():
+    intent = heuristic_intent("cuales son mis productos mas vendidos")
+    artifact = build_evidence_artifact(
+        question="cuales son mis productos mas vendidos",
+        intent=intent,
+        plan=ToolPlan(
+            steps=(),
+            coverage=("products",),
+            missing_coverage=(),
+            valid=True,
+        ),
+        observations=[],
+        conversation_plan={
+            "intent_type": "ranking",
+            "context_dependency": "none",
+            "reuse_previous_artifact": False,
+            "tool_policy": "auto",
+        },
+    )
+    artifact["safe_to_answer"] = True
+    artifact["answer_strategy"] = {"type": "direct"}
+    summary = deterministic_evidence_summary(artifact)
+
+    assert "No encontre" not in summary
+    assert "productos" in summary.lower()
+    assert "periodo" in summary.lower()
+
+
+def test_tool_failure_message_is_actionable_not_generic_failure():
+    intent = heuristic_intent("productos mas vendidos con margen")
+    artifact = build_evidence_artifact(
+        question="productos mas vendidos con margen",
+        intent=intent,
+        plan=ToolPlan(
+            steps=(
+                ToolPlanStep(
+                    tool_name="waro.queries.run",
+                    arguments={},
+                    fields=(),
+                    purpose="Consultar productos",
+                    expected_evidence=("products",),
+                ),
+            ),
+            coverage=("products",),
+            missing_coverage=(),
+            valid=True,
+            blocked_reason="all_tools_failed",
+        ),
+        observations=[
+            {
+                "tool_name": "waro.queries.run",
+                "status": "failed",
+                "error": {"message": "Invalid QuerySpec dimensions"},
+            }
+        ],
+        conversation_plan={
+            "intent_type": "ranking",
+            "context_dependency": "none",
+            "reuse_previous_artifact": False,
+            "tool_policy": "auto",
+        },
+    )
+    summary = deterministic_evidence_summary(artifact)
+
+    assert "fallaron las herramientas requeridas" not in summary
+    assert "no voy a inventar" in summary.lower()
+    assert "waro.queries.run" in summary
+
+
+def test_required_context_without_previous_evidence_asks_for_context_instead_of_template_failure():
+    intent = heuristic_intent("por que salen negativos")
+    artifact = build_evidence_artifact(
+        question="por que salen negativos",
+        intent=intent,
+        plan=ToolPlan(
+            steps=(),
+            coverage=("previous_artifact",),
+            missing_coverage=(),
+            valid=True,
+        ),
+        observations=[],
+        conversation_plan={
+            "intent_type": "diagnosis",
+            "context_dependency": "required",
+            "reuse_previous_artifact": True,
+            "tool_policy": "reuse_only",
+        },
+    )
+    artifact["safe_to_answer"] = True
+    artifact["answer_strategy"] = {"type": "diagnosis", "use_previous_artifact": True}
+    summary = deterministic_evidence_summary(artifact)
+
+    assert "No encontre una plantilla" not in summary
+    assert "Necesito el contexto analitico anterior" in summary
+
+
+@pytest.mark.asyncio
+async def test_meta_conversation_summary_prefers_llm_composer_over_static_fallback():
+    intent = heuristic_intent("puedes conversar?")
+    conversation_plan = {
+        "intent_type": "definition",
+        "context_dependency": "none",
+        "subject": "kali_capabilities",
+        "reuse_previous_artifact": False,
+        "required_evidence": [],
+        "tool_policy": "reuse_only",
+        "answer_contract": {"must_explain": ["conversation"], "must_not": ["query_database"]},
+    }
+    artifact = build_evidence_artifact(
+        question="puedes conversar?",
+        intent=intent,
+        plan=ToolPlan(
+            steps=(),
+            coverage=(),
+            missing_coverage=(),
+            valid=True,
+        ),
+        observations=[],
+        conversation_plan=conversation_plan,
+    )
+    artifact["answer_strategy"] = {"type": "explanation"}
+    fallback = deterministic_evidence_summary(artifact)
+    summary = await compose_agent_summary(
+        settings=Settings(LLM_PROVIDER="kimi"),
+        llm_adapter=MetaConversationLLM(),
+        artifact=artifact,
+        complexity="simple",
+        fallback=fallback,
+    )
+
+    assert summary == "Si, puedo conversar contigo y sostener contexto mientras analizamos datos con evidencia."
+    assert summary != fallback
+
+
+def test_product_margin_diagnosis_uses_previous_artifact_as_evidence_without_repeating_ranking():
+    intent = resolve_contextual_intent(
+        heuristic_intent("por qué algunos márgenes salen negativos"),
+        question="por qué algunos márgenes salen negativos",
+        conversation_state={
+            "source": "artifact",
+            "active_entity": "product",
+            "active_grain": "product_period",
+            "active_measures": ["quantity_sold", "margin", "revenue"],
+            "last_artifact": {
+                "query_metadata": [{"dataset": "product_profitability", "measures": ["profit_margin_pct"], "dimensions": ["product", "cost_source"]}],
+                "ranked_rows": [
+                    {
+                        "name": "HOT DOG SENCILLO",
+                        "quantity": 1131,
+                        "revenue": 8741500,
+                        "margin": -401.4,
+                        "cost_source": "real",
+                    },
+                    {
+                        "name": "PAPAS FRITAS",
+                        "quantity": 300,
+                        "revenue": 1500000,
+                        "margin": 44.5,
+                        "cost_source": "real",
+                    },
+                ],
+            },
+        },
+    )
+    conversation_plan = {
+        "intent_type": "diagnosis",
+        "context_dependency": "required",
+        "reuse_previous_artifact": True,
+        "preserve_dataset": "product_profitability",
+        "required_evidence": ["ranked_rows", "margin", "cost_source"],
+        "tool_policy": "reuse_only",
+        "answer_contract": {"must_explain": ["negative_margin"], "must_not": ["repeat_full_ranking"]},
+    }
+    artifact = build_evidence_artifact(
+        question="por qué algunos márgenes salen negativos",
+        intent=intent,
+        plan=ToolPlan(
+            steps=(),
+            coverage=("previous_artifact",),
+            missing_coverage=(),
+            valid=True,
+        ),
+        observations=[],
+        conversation_state={
+            "source": "artifact",
+            "active_entity": "product",
+            "last_artifact": {
+                "query_metadata": [{"dataset": "product_profitability", "measures": ["profit_margin_pct"], "dimensions": ["product", "cost_source"]}],
+                "ranked_rows": [
+                    {
+                        "name": "HOT DOG SENCILLO",
+                        "quantity": 1131,
+                        "revenue": 8741500,
+                        "margin": -401.4,
+                        "cost_source": "real",
+                    },
+                    {
+                        "name": "PAPAS FRITAS",
+                        "quantity": 300,
+                        "revenue": 1500000,
+                        "margin": 44.5,
+                        "cost_source": "real",
+                    },
+                ],
+            },
+        },
+        conversation_plan=conversation_plan,
+    )
+    artifact["answer_strategy"] = {"type": "diagnosis", "use_previous_artifact": True}
+    summary = deterministic_evidence_summary(artifact)
+
+    assert artifact["safe_to_answer"] is True
+    assert artifact["ranked_rows"][0]["name"] == "HOT DOG SENCILLO"
+    assert "Mi lectura" in summary
+    assert "margen negativo" in summary
+    assert "costo real" in summary
+    assert "1. HOT DOG SENCILLO" not in summary
+
+
 def test_query_evidence_preserves_metadata_and_limitations():
     intent = heuristic_intent("dime los productos mas vendidos del año y su margen")
     plan = build_tool_plan(
@@ -827,6 +1419,43 @@ def test_query_evidence_preserves_metadata_and_limitations():
     assert artifact["tables"][0]["rows"][0]["name"] == "Burger"
     assert artifact["tables"][0]["rows"][0]["margin"] == 12
     assert "Solo productos con ventas cerradas." in artifact["limitations"]
+
+
+def test_query_evidence_reads_nested_data_rows():
+    intent = heuristic_intent("dime los productos mas vendidos del año y su margen")
+    plan = build_tool_plan(
+        intent,
+        match_tools(intent, [_queries_capability()], scopes=("analytics:read",)),
+    )
+    artifact = build_evidence_artifact(
+        question="dime los productos mas vendidos del año y su margen",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.queries.run",
+                "status": "succeeded",
+                "arguments": {"spec": plan.steps[0].arguments["spec"]},
+                "result": {
+                    "data": {
+                        "rows": [
+                            {
+                                "product": "HOT DOG SENCILLO",
+                                "quantity_sold": 1131,
+                                "revenue": 8741500,
+                                "profit_margin_pct": -401.36,
+                            }
+                        ],
+                        "meta": {"dataset": "product_profitability", "row_count": 1},
+                    }
+                },
+            }
+        ],
+    )
+
+    assert artifact["ranked_rows"][0]["name"] == "HOT DOG SENCILLO"
+    assert artifact["ranked_rows"][0]["quantity"] == 1131
+    assert artifact["ranked_rows"][0]["margin"] == -401.36
 
 
 def test_product_query_analysis_creates_non_ranking_follow_up():
@@ -1107,7 +1736,7 @@ def test_evidence_summarizes_business_analysis_patterns():
     assert "Acciones recomendadas" in summary
 
 
-def test_capability_uses_schema_default_fields_over_legacy_defaults():
+def test_capability_uses_schema_default_fields_over_static_defaults():
     contract = ResponseContract(
         command=("analytics", "menu"),
         shape="rows",
@@ -1186,6 +1815,127 @@ async def test_agent_loop_uses_catalog_fallback_when_llm_step_fails():
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_attaches_advisor_analysis_when_llm_returns_structured_json():
+    settings = Settings(TOOL_CATALOG_SOURCE="static", LLM_PROVIDER="kimi", KIMI_API_KEY="test")
+    registry = ToolRegistry(settings)
+    set_tool_registry(registry)
+    await registry.refresh(force=True)
+    loop = AgentLoop(
+        settings=settings,
+        gateway=FakeGateway(),
+        registry=registry,
+        llm_adapter=AdvisorLLM(),
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-agent-advisor",
+        member_id=None,
+        scopes=("orders:read", "financial:read", "menu:read", "customers:read", "analytics:read"),
+    )
+    artifact = await loop.run(
+        question="dime qué productos venden mucho pero tienen bajo margen",
+        context=context,
+        run_id=uuid4(),
+        complexity="complex",
+    )
+    assert artifact["advisor_analysis"]["direct_answer"].startswith("Los productos")
+    assert artifact["advisor_state"]["active_topic"] == "product_profitability"
+    assert "negative_margin_due_to_cost_gt_price" in artifact["advisor_state"]["known_data_issues"]
+
+
+@pytest.mark.asyncio
+async def test_kali_runner_uses_tool_reasoning_agent_when_llm_enabled():
+    from app.agent.runner import KaliAgentRunner
+
+    @asynccontextmanager
+    async def connection_factory():
+        class FakeConnection:
+            async def fetchrow(self, query, *args):
+                return {"id": uuid4()}
+
+            async def execute(self, *args, **kwargs):
+                return None
+
+        yield FakeConnection()
+
+    settings = Settings(TOOL_CATALOG_SOURCE="static", LLM_PROVIDER="kimi", KIMI_API_KEY="test")
+    registry = ToolRegistry(settings)
+    await registry.refresh(force=True)
+    runner = KaliAgentRunner(
+        settings=settings,
+        gateway=FakeGateway(),
+        registry=registry,
+        llm_adapter=ToolReasoningLLM(),
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-tool-reasoning",
+        member_id=None,
+        scopes=("orders:read", "financial:read", "menu:read", "customers:read", "analytics:read"),
+    )
+
+    artifact = await runner.execute(
+        question="dame ventas y luego explicame",
+        context=context,
+        run_id=uuid4(),
+        conversation_id=uuid4(),
+    )
+
+    assert artifact["agent_engine_version"] == "tool-reasoning-v1"
+    assert artifact["summary"] == "Respuesta conversacional desde herramienta, sin resumen deterministico."
+    assert artifact["observations"][0]["tool_name"] == "waro.sales.metrics"
+
+
+@pytest.mark.asyncio
+async def test_kali_runner_does_not_fall_back_to_legacy_when_tool_reasoning_fails():
+    from app.agent.runner import KaliAgentRunner
+
+    @asynccontextmanager
+    async def connection_factory():
+        class FakeConnection:
+            async def fetchrow(self, query, *args):
+                return {"id": uuid4()}
+
+            async def execute(self, *args, **kwargs):
+                return None
+
+        yield FakeConnection()
+
+    settings = Settings(TOOL_CATALOG_SOURCE="static", LLM_PROVIDER="kimi", KIMI_API_KEY="test")
+    registry = ToolRegistry(settings)
+    await registry.refresh(force=True)
+    runner = KaliAgentRunner(
+        settings=settings,
+        gateway=FakeGateway(),
+        registry=registry,
+        llm_adapter=FailingLLM(),
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-tool-reasoning-failed",
+        member_id=None,
+        scopes=("orders:read", "financial:read", "menu:read", "customers:read", "analytics:read"),
+    )
+
+    artifact = await runner.execute(
+        question="por que algunos margenes salen negativos",
+        context=context,
+        run_id=uuid4(),
+        conversation_id=uuid4(),
+    )
+
+    assert artifact["agent_engine_version"] == "tool-reasoning-v1"
+    assert artifact["safe_to_answer"] is False
+    assert artifact["blocked_reason"] == "tool_reasoning_failed"
+    assert "flujo anterior" in artifact["summary"]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_blocks_invalid_queryspec_before_gateway(monkeypatch):
     async def fake_load(self):
         return _queries_schema_payload()
@@ -1256,11 +2006,6 @@ async def test_sales_workflow_react_mode_uses_agent_runner():
                 "complexity": "simple",
             }
 
-        async def execute_shadow(self, **kwargs):
-            legacy = kwargs["legacy_artifact"]
-            legacy["agent_shadow_artifact"] = {"shadow": True}
-            return legacy
-
     @asynccontextmanager
     async def connection_factory():
         class FakeConnection:
@@ -1299,6 +2044,74 @@ async def test_sales_workflow_react_mode_uses_agent_runner():
 
 
 @pytest.mark.asyncio
+async def test_sales_workflow_follow_up_still_uses_agent_runner():
+    from app.workflows.sales import SalesWorkflow
+
+    class RecordingRunner:
+        def __init__(self):
+            self.questions = []
+
+        async def execute(self, **kwargs):
+            self.questions.append(kwargs["question"])
+            return {
+                "agent_mode": True,
+                "safe_to_answer": True,
+                "summary": "Diagnostico conversacional desde Kali",
+                "observations": [],
+                "tables": [],
+                "complexity": "simple",
+            }
+
+    @asynccontextmanager
+    async def connection_factory():
+        class FakeConnection:
+            async def fetchrow(self, query, *args):
+                return {"id": uuid4()}
+
+            async def execute(self, *args, **kwargs):
+                return None
+
+        yield FakeConnection()
+
+    runner = RecordingRunner()
+    workflow = SalesWorkflow(
+        settings=Settings(AGENT_MODE="react", LLM_PROVIDER="disabled"),
+        gateway=FakeGateway(),
+        llm_adapter=FakeLLM(),
+        connection_factory=connection_factory,
+    )
+    workflow.kali_runner = runner
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-react-follow-up",
+        member_id=None,
+        scopes=("orders:read",),
+    )
+    route = await workflow._route_sales(
+        {
+            "request": type("Req", (), {"question": "por que algunos margenes salen negativos", "conversation_id": uuid4()})(),
+            "context": context,
+            "run_id": uuid4(),
+        }
+    )
+    state = await workflow._run_kali_agent_node(
+        {
+            "request": type("Req", (), {"question": "por que algunos margenes salen negativos"})(),
+            "context": context,
+            "run_id": uuid4(),
+            "conversation_id": uuid4(),
+            "sales_intent": "follow_up",
+        }
+    )
+
+    assert route["sales_intent"] == "kali_agent"
+    assert runner.questions == ["por que algunos margenes salen negativos"]
+    assert state["summary"] == "Diagnostico conversacional desde Kali"
+    assert state["artifact"]["agent_mode"] is True
+
+
+@pytest.mark.asyncio
 async def test_sales_workflow_stream_react_mode_uses_graph():
     from app.workflows.sales import SalesWorkflow
 
@@ -1318,11 +2131,6 @@ async def test_sales_workflow_stream_react_mode_uses_graph():
                 "tables": [],
                 "complexity": "simple",
             }
-
-        async def execute_shadow(self, **kwargs):
-            legacy = kwargs["legacy_artifact"]
-            legacy["agent_shadow_artifact"] = {"shadow": True}
-            return legacy
 
     @asynccontextmanager
     async def connection_factory():

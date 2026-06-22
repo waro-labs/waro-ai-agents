@@ -1,4 +1,4 @@
-"""Dynamic tool catalog loaded from waro CLI schema with legacy fallback."""
+"""Dynamic tool catalog loaded from waro CLI schema with static fallback."""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
-from app.tools.allowlist import TOOL_SPECS, ToolArgs, ToolSpec, coerce_args as legacy_coerce_args
+from app.tools.allowlist import TOOL_SPECS, ToolArgs, ToolSpec, coerce_args as static_coerce_args
 from app.tools.schema_v2 import (
     AGENT_SCHEMA_V2,
     AgentToolSchema,
-    legacy_tool_to_v2_dict,
     parse_agent_catalog_payload,
+    static_tool_to_v2_dict,
     tool_schema_from_dict,
 )
 from app.tools.sanitize import sanitize_text
@@ -38,9 +38,9 @@ def _build_dynamic_args_model(arguments_schema: dict[str, Any]) -> type[ToolArgs
     return DynamicToolArgs
 
 
-def agent_schema_to_tool_spec(schema: AgentToolSchema, *, legacy: ToolSpec | None = None) -> ToolSpec:
-    if legacy is not None:
-        return legacy
+def agent_schema_to_tool_spec(schema: AgentToolSchema, *, static_spec: ToolSpec | None = None) -> ToolSpec:
+    if static_spec is not None:
+        return static_spec
     args_model = _build_dynamic_args_model(schema.arguments_schema)
     domain: DomainName = schema.domain if schema.domain in {
         "sales",
@@ -135,16 +135,16 @@ class ToolRegistry:
         tools: dict[str, ToolSpec] = {}
         schemas: dict[str, AgentToolSchema] = {}
         for agent_schema in agent_schemas:
-            legacy = TOOL_SPECS.get(agent_schema.name)
-            spec = agent_schema_to_tool_spec(agent_schema, legacy=legacy)
+            static_spec = TOOL_SPECS.get(agent_schema.name)
+            spec = agent_schema_to_tool_spec(agent_schema, static_spec=static_spec)
             tools[spec.name] = spec
             schemas[spec.name] = agent_schema
         if not tools:
             return self._load_static()
-        for name, legacy_spec in TOOL_SPECS.items():
+        for name, static_spec in TOOL_SPECS.items():
             if name not in tools:
-                tools[name] = legacy_spec
-                schemas[name] = tool_schema_from_dict(legacy_tool_to_v2_dict(legacy_spec))  # type: ignore[arg-type]
+                tools[name] = static_spec
+                schemas[name] = tool_schema_from_dict(static_tool_to_v2_dict(static_spec))  # type: ignore[arg-type]
         return CatalogSnapshot(
             version=version or AGENT_SCHEMA_V2,
             source="cli",
@@ -155,11 +155,11 @@ class ToolRegistry:
 
     def _load_static(self) -> CatalogSnapshot:
         schemas = {
-            name: tool_schema_from_dict(legacy_tool_to_v2_dict(spec))
+            name: tool_schema_from_dict(static_tool_to_v2_dict(spec))
             for name, spec in TOOL_SPECS.items()
         }
         return CatalogSnapshot(
-            version="static-legacy",
+            version="static",
             source="static",
             loaded_at=time.monotonic(),
             tools=dict(TOOL_SPECS),
@@ -216,11 +216,11 @@ async def get_tool_spec_async(tool_name: str, *, settings: Settings | None = Non
 
 
 def get_tool_spec(tool_name: str) -> ToolSpec | None:
-    """Sync lookup — uses static legacy catalog; prefer async registry in hot paths."""
+    """Sync lookup using the static catalog; prefer async registry in hot paths."""
     return TOOL_SPECS.get(tool_name)
 
 
 async def coerce_args_async(spec: ToolSpec, arguments: dict[str, Any]) -> ToolArgs:
     if spec.name in TOOL_SPECS and TOOL_SPECS[spec.name].args_model is spec.args_model:
-        return legacy_coerce_args(spec, arguments)
+        return static_coerce_args(spec, arguments)
     return spec.args_model.model_validate(arguments)

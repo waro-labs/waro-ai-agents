@@ -110,7 +110,7 @@ DATASET_RULES: dict[str, QueryDatasetRule] = {
                 "total_profit",
             }
         ),
-        dimensions=frozenset({"product", "product_id", "category", "classification", "day"}),
+        dimensions=frozenset({"product", "product_id", "category", "classification", "cost_source", "day"}),
     ),
 }
 
@@ -225,11 +225,27 @@ def _query_dimensions(intent: QuestionIntent, *, rule: QueryDatasetRule) -> list
     candidates = [_canonical_query_dimension(item) for item in intent.dimensions]
     if intent.entity == "product":
         candidates.insert(0, "product")
+    if "cost_source" in rule.dimensions and _needs_cost_context(intent):
+        candidates.insert(1, "cost_source")
     if intent.entity == "customer":
         candidates.insert(0, "customer")
     if intent.entity == "sale":
         candidates.insert(0, "day")
     return [item for item in _dedupe(candidates) if item in rule.dimensions][:3]
+
+
+def _needs_cost_context(intent: QuestionIntent) -> bool:
+    cost_measures = {
+        "margin",
+        "cost",
+        "profit",
+        "profit_margin_pct",
+        "profit_margin_real_pct",
+        "profit_margin_operativo_pct",
+        "profit_per_unit",
+        "total_profit",
+    }
+    return bool(cost_measures.intersection(intent.measures))
 
 
 def _order_field(intent: QuestionIntent, *, measures: list[str], rule: QueryDatasetRule) -> str:

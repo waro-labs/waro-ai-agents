@@ -212,9 +212,7 @@ class FoodCostWorkflow:
             )
 
     def _build_graph(self):
-        if self.settings.agent_mode == "react":
-            return self._build_react_graph()
-        return self._build_legacy_graph()
+        return self._build_react_graph()
 
     def _build_react_graph(self):
         graph = StateGraph(FoodCostGraphState)
@@ -246,19 +244,6 @@ class FoodCostWorkflow:
                 if isinstance(obs, dict)
             ],
         }
-
-    def _build_legacy_graph(self):
-        graph = StateGraph(FoodCostGraphState)
-        graph.add_node("route_food_cost", self._route_food_cost)
-        graph.add_node("call_food_cost_tools", self._call_food_cost_tools_node)
-        graph.add_node("build_artifact", self._build_artifact_node)
-        graph.add_node("finish_run", self._finish_run_node)
-        graph.add_edge(START, "route_food_cost")
-        graph.add_edge("route_food_cost", "call_food_cost_tools")
-        graph.add_edge("call_food_cost_tools", "build_artifact")
-        graph.add_edge("build_artifact", "finish_run")
-        graph.add_edge("finish_run", END)
-        return graph.compile()
 
     async def _route_food_cost(self, state: FoodCostGraphState) -> FoodCostGraphState:
         with self.tracer.start_as_current_span("food_cost.route_intent") as span:

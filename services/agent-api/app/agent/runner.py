@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from typing import Any
+from uuid import UUID
+
 from app.agent.classifier import classify_complexity
 from app.agent.composer import compose_agent_summary, deterministic_summary
 from app.agent.conversation import load_conversation_messages, load_conversation_state
 from app.agent.loop import AgentLoop
+from app.agent.tool_reasoning import run_tool_reasoning_agent
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
 from app.llm.base import LLMAdapter
 from app.llm.model_router import Complexity
 from app.tools import ToolGateway
 from app.tools.registry import ToolRegistry
-from uuid import UUID
 
 
 class KaliAgentRunner:
@@ -60,6 +63,41 @@ class KaliAgentRunner:
             conversation_messages=conversation_messages,
         )
         complexity: Complexity = classification["complexity"]
+        if self.settings.llm_provider != "disabled":
+            try:
+                artifact = await run_tool_reasoning_agent(
+                    settings=self.settings,
+                    llm_adapter=self.llm_adapter,
+                    gateway=self.gateway,
+                    registry=self.registry,
+                    question=question,
+                    context=context,
+                    run_id=run_id,
+                    conversation_messages=conversation_messages,
+                    complexity=complexity,
+                )
+                artifact["classification"] = classification
+                return artifact
+            except Exception as exc:
+                print(f"[agent-api:tool-reasoning] failed {type(exc).__name__}: {exc}", flush=True)
+                return {
+                    "intent": "tool_reasoning",
+                    "agent_mode": True,
+                    "agent_engine_version": "tool-reasoning-v1",
+                    "question": question,
+                    "safe_to_answer": False,
+                    "answerability": "blocked",
+                    "blocked_reason": "tool_reasoning_failed",
+                    "summary": (
+                        "Tuve un error en el agente conversacional nuevo antes de reunir evidencia suficiente. "
+                        "No voy a responder con el flujo anterior para evitar una respuesta repetida o rígida; "
+                        "reintenta la pregunta o revisemos el log de tool-reasoning."
+                    ),
+                    "observations": [],
+                    "tool_calls": [],
+                    "classification": classification,
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                }
         artifact = await self.loop.run(
             question=question,
             context=context,
@@ -80,30 +118,3 @@ class KaliAgentRunner:
         )
         artifact["summary"] = summary
         return artifact
-
-    async def execute_shadow(
-        self,
-        *,
-        question: str,
-        context: InternalRequestContext,
-        run_id: UUID,
-        conversation_id: UUID | None,
-        legacy_artifact: dict[str, Any],
-    ) -> dict[str, Any]:
-        agent_artifact = await self.execute(
-            question=question,
-            context=context,
-            run_id=run_id,
-            conversation_id=conversation_id,
-        )
-        agent_artifact["shadow"] = {
-            "legacy_safe_to_answer": legacy_artifact.get("response_contract", {}).get(
-                "safe_to_answer"
-            ),
-            "agent_safe_to_answer": agent_artifact.get("safe_to_answer"),
-            "legacy_tool_count": len(legacy_artifact.get("tool_calls") or []),
-            "agent_observation_count": len(agent_artifact.get("observations") or []),
-        }
-        merged = dict(legacy_artifact)
-        merged["agent_shadow_artifact"] = agent_artifact
-        return merged

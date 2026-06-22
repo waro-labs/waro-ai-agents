@@ -18,9 +18,17 @@ def build_evidence_artifact(
     conversation_messages: list[dict[str, str]] | None = None,
     conversation_state: dict[str, Any] | None = None,
     classification: dict[str, Any] | None = None,
+    conversation_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = profile_for_intent(intent)
     tables = [_table_from_observation(observation) for observation in observations]
+    if conversation_plan and (
+        conversation_plan.get("reuse_previous_artifact")
+        or conversation_plan.get("tool_policy") == "merge"
+    ):
+        previous_table = _table_from_previous_artifact(conversation_state)
+        if previous_table is not None:
+            tables.insert(0, previous_table)
     metrics = _merge_metrics(tables)
     ranked_rows = _ranked_rows(intent, tables)
     analysis = _analysis_from_evidence(intent, tables, metrics, ranked_rows)
@@ -29,10 +37,13 @@ def build_evidence_artifact(
     if not plan.valid:
         answerability = "blocked"
         blocked_reason = plan.blocked_reason or "invalid_plan"
-    elif not observations:
+    elif _is_meta_conversation_plan(conversation_plan):
+        answerability = "answerable"
+        blocked_reason = None
+    elif not tables:
         answerability = "blocked"
         blocked_reason = "no_tool_results"
-    elif len(failed) == len(observations):
+    elif observations and len(failed) == len(observations):
         answerability = "blocked"
         blocked_reason = "all_tools_failed"
     elif failed:
@@ -55,7 +66,14 @@ def build_evidence_artifact(
         "question": question,
         "question_intent": intent.to_dict(),
         "conversation_state": conversation_state or {},
+        "advisor_state": (
+            conversation_state.get("advisor_state")
+            if isinstance(conversation_state, dict)
+            and isinstance(conversation_state.get("advisor_state"), dict)
+            else {}
+        ),
         "context_usage": _context_usage(question=question, conversation_state=conversation_state),
+        "conversation_plan": conversation_plan or {},
         "classification": classification or {},
         "plan": plan.to_dict(),
         "tool_results": observations,
@@ -102,12 +120,24 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
     period = intent.get("time_range", {}).get("label") if isinstance(intent.get("time_range"), dict) else ""
     strategy_payload = artifact.get("answer_strategy") if isinstance(artifact.get("answer_strategy"), dict) else {}
     strategy = str(strategy_payload.get("type") or "")
+    conversation_plan = artifact.get("conversation_plan") if isinstance(artifact.get("conversation_plan"), dict) else {}
+    if _is_meta_conversation_plan(conversation_plan):
+        return _meta_conversation_summary(artifact)
+    if conversation_plan.get("subject") == "generic_customers":
+        return _generic_customer_impact_summary(artifact, rows, period)
+    product_context = entity == "product" or conversation_plan.get("preserve_dataset") == "product_profitability"
     if strategy in {"follow_up", "recommendation"} and not rows:
         rows = _previous_ranked_rows(artifact)
 
     if strategy == "recommendation":
         return _recommendation_summary(artifact, period)
-    if strategy == "follow_up" and entity == "product" and rows:
+    if strategy == "diagnosis" and product_context and rows:
+        contract = conversation_plan.get("answer_contract") if isinstance(conversation_plan.get("answer_contract"), dict) else {}
+        must_explain = _string_items(contract.get("must_explain"))
+        if "price_signal" in must_explain or "cost_signal" in must_explain:
+            return _product_cause_classification_summary(artifact, rows, period)
+        return _product_diagnosis_summary(artifact, rows, period)
+    if strategy == "follow_up" and product_context and rows:
         return _product_follow_up_summary(artifact, rows, period)
     if strategy == "diagnosis" and entity == "business":
         if bool(strategy_payload.get("avoid_repeating")):
@@ -127,7 +157,10 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
             return f"{_period_prefix(period)} vendiste {total}."
     if entity == "product":
         if not rows:
-            return "No encontre filas de productos suficientes para responder con ranking."
+            return (
+                "Puedo analizar productos, pero esta consulta no trajo filas de productos para ordenar. "
+                "Revisa el periodo o pideme ventas de productos, margen o rentabilidad con un rango especifico."
+            )
         lines = [_product_title(measures, period)]
         for index, row in enumerate(rows[:10], start=1):
             name = row.get("name") or row.get("product_name") or row.get("id") or "Producto"
@@ -140,13 +173,19 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
             if revenue:
                 bits.append(f"{revenue} vendido")
             if "margin" in measures and margin is not None:
-                bits.append(f"margen {margin}%")
+                bits.append(f"margen {_fmt_percent(margin)}")
+            cost_source = row.get("cost_source")
+            if cost_source:
+                bits.append(f"costo {cost_source}")
             lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
         return "\n".join(lines)
     if entity == "customer":
         if intent.get("grain") == "cohort_period":
             if not rows:
-                return "No encontre cohortes suficientes para analizar retencion."
+                return (
+                    "Puedo analizar retencion, pero esta consulta no trajo cohortes suficientes. "
+                    "Prueba con un periodo mas amplio o una pregunta de clientes recurrentes."
+                )
             lines = [f"Retencion por cohortes para {_period_label(period)}:"]
             for index, row in enumerate(rows[:10], start=1):
                 label = row.get("cohort_label") or row.get("cohort_date") or "Cohorte"
@@ -164,7 +203,10 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
             return "\n".join(lines)
         if intent.get("grain") == "customer_period_segment":
             if not rows:
-                return "No encontre clientes suficientes para segmentacion RFM."
+                return (
+                    "Puedo segmentar clientes, pero esta consulta no trajo clientes suficientes para RFM. "
+                    "Prueba con un periodo mas amplio o con clientes por frecuencia y valor."
+                )
             lines = [f"Segmentacion RFM para {_period_label(period)}:"]
             for index, row in enumerate(rows[:20], start=1):
                 name = row.get("customer_name") or row.get("customer_id") or "Cliente"
@@ -180,7 +222,10 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
             return "\n".join(lines)
         if intent.get("grain") == "customer_risk":
             if not rows:
-                return "No encontre clientes en riesgo con los criterios consultados."
+                return (
+                    "Puedo revisar riesgo de abandono, pero esta consulta no trajo clientes que cumplan esos criterios. "
+                    "Podemos ampliar el periodo o bajar el umbral de dias sin compra."
+                )
             lines = ["Clientes en riesgo de no volver:"]
             for index, row in enumerate(rows[:20], start=1):
                 name = row.get("name") or row.get("customer_id") or "Cliente"
@@ -197,7 +242,10 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
                 lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
             return "\n".join(lines)
         if not rows:
-            return "No encontre clientes suficientes para responder con ranking."
+            return (
+                "Puedo analizar clientes, pero esta consulta no trajo filas suficientes para construir un ranking. "
+                "Prueba con clientes por ventas, frecuencia, ticket promedio o WAROS."
+            )
         if "compare" in intent.get("operations", []):
             label = "Comparacion de clientes frecuentes contra mayor valor comprado"
         else:
@@ -231,7 +279,10 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
                 bits.append(f"tasa de redencion: {rate}%")
             return f"Analitica WAROS para {_period_label(period)}: " + ", ".join(bits)
         if not rows:
-            return "No encontre datos de WAROS suficientes para responder."
+            return (
+                "Puedo analizar WAROS, pero esta consulta no trajo movimientos suficientes. "
+                "Prueba con WAROS generados, redimidos o balance por cliente en un periodo especifico."
+            )
         lines = [f"Clientes que mas generaron WAROS para {_period_label(period)}:"]
         for index, row in enumerate(rows[:20], start=1):
             name = row.get("name") or row.get("customer_name") or row.get("customer_id") or row.get("period") or "Cliente"
@@ -247,7 +298,59 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
                 bits.append(f"{txs} transacciones")
             lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
         return "\n".join(lines)
-    return "Tengo datos suficientes, pero no pude generar un resumen especifico para esta consulta."
+    if rows:
+        lines = [f"Resultados para {_period_label(period)}:"]
+        for index, row in enumerate(rows[:10], start=1):
+            name = _row_name(row, fallback=f"Fila {index}")
+            bits = _row_summary_bits(row)
+            lines.append(f"{index}. {name}" + (f" ({', '.join(bits)})" if bits else ""))
+        return "\n".join(lines)
+    return _no_evidence_summary(artifact)
+
+
+def _is_meta_conversation_plan(conversation_plan: dict[str, Any] | None) -> bool:
+    if not isinstance(conversation_plan, dict):
+        return False
+    return (
+        conversation_plan.get("intent_type") in {"definition", "clarification"}
+        and conversation_plan.get("subject") == "kali_capabilities"
+    )
+
+
+def _meta_conversation_summary(artifact: dict[str, Any]) -> str:
+    question = str(artifact.get("question") or "").lower()
+    if "convers" in question or "hablar" in question:
+        return (
+            "Si, puedo conversar contigo. Tambien puedo mantener el contexto entre preguntas, "
+            "explicar resultados, revisar posibles problemas de datos y sugerir siguientes pasos. "
+            "Cuando hablemos de cifras, voy a apoyarme en evidencia consultada para no inventar metricas."
+        )
+    return (
+        "Puedo ayudarte a explorar ventas, productos, margenes, clientes y calidad de datos en forma conversacional. "
+        "Puedes preguntarme una metrica y luego pedirme causas, riesgos o acciones siguientes."
+    )
+
+
+def _no_evidence_summary(artifact: dict[str, Any]) -> str:
+    plan = artifact.get("conversation_plan") if isinstance(artifact.get("conversation_plan"), dict) else {}
+    context = artifact.get("conversation_state") if isinstance(artifact.get("conversation_state"), dict) else {}
+    question = str(artifact.get("question") or "").strip()
+    if plan.get("context_dependency") == "required" or plan.get("reuse_previous_artifact"):
+        return (
+            "Necesito el contexto analitico anterior para responder bien esta pregunta. "
+            "Haz primero una consulta con datos, por ejemplo productos vendidos con margen, y luego puedo explicar causas o riesgos."
+        )
+    if context.get("source") in {None, "none", "messages"}:
+        return (
+            "Puedo ayudarte, pero esta pregunta no produjo evidencia de datos para analizar. "
+            "Preguntame por ventas, productos, margenes, clientes o calidad de datos y continuo desde ahi."
+        )
+    if question:
+        return (
+            "No tengo evidencia suficiente para responder esa pregunta sin inventar. "
+            "Puedo reformularla como consulta de datos o usar el contexto anterior si aplica."
+        )
+    return "No tengo evidencia suficiente para responder sin inventar."
 
 
 def _context_usage(*, question: str, conversation_state: dict[str, Any] | None) -> dict[str, Any]:
@@ -271,6 +374,30 @@ def _previous_ranked_rows(artifact: dict[str, Any]) -> list[dict[str, Any]]:
     previous = context.get("last_artifact") if isinstance(context.get("last_artifact"), dict) else {}
     rows = previous.get("ranked_rows") if isinstance(previous.get("ranked_rows"), list) else []
     return [row for row in rows if isinstance(row, dict)]
+
+
+def _table_from_previous_artifact(conversation_state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(conversation_state, dict):
+        return None
+    previous = conversation_state.get("last_artifact")
+    if not isinstance(previous, dict):
+        return None
+    rows = previous.get("ranked_rows") if isinstance(previous.get("ranked_rows"), list) else []
+    rows = [row for row in rows if isinstance(row, dict)]
+    if not rows:
+        return None
+    metadata_items = previous.get("query_metadata") if isinstance(previous.get("query_metadata"), list) else []
+    query_metadata = next((item for item in metadata_items if isinstance(item, dict)), {})
+    return {
+        "tool": "previous_artifact",
+        "status": "succeeded",
+        "expected_evidence": ["previous_artifact", "ranked_rows"],
+        "rows": [_normalize_query_row(row, query_metadata) for row in rows],
+        "metrics": previous.get("metrics") if isinstance(previous.get("metrics"), dict) else {},
+        "query_metadata": query_metadata,
+        "limitations": _query_limitations(query_metadata),
+        "summary": previous.get("summary"),
+    }
 
 
 def _query_metadata_from_tables(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -404,7 +531,7 @@ def _rows_from_result(result: dict[str, Any] | None) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [row for row in data if isinstance(row, dict)]
     if isinstance(data, dict):
-        for key in ("products", "series", "top_customers", "items", "customers"):
+        for key in ("rows", "products", "series", "top_customers", "items", "customers"):
             value = data.get(key)
             if isinstance(value, list):
                 return [row for row in value if isinstance(row, dict)]
@@ -517,6 +644,7 @@ def _merge_product_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ("profit_margin_pct", "margin"),
             ("profit_margin_real_pct", "margin"),
             ("profit_margin_operativo_pct", "margin_operativo"),
+            ("cost_source", "cost_source"),
             ("total_profit", "total_profit"),
             ("profit_per_unit", "profit_per_unit"),
             ("category", "category"),
@@ -767,7 +895,7 @@ def _business_analysis_summary(artifact: dict[str, Any], period: str | None) -> 
         lines.append("Limitaciones:")
         lines.extend(f"- {item}" for item in limitations[:3])
     if len(lines) == 1:
-        lines.append("No encontre evidencia suficiente para identificar patrones profundos.")
+        lines.append("Todavia no tengo evidencia suficiente para separar patrones profundos sin inventar.")
     return "\n".join(lines)
 
 
@@ -815,7 +943,7 @@ def _recommendation_summary(artifact: dict[str, Any], period: str | None) -> str
         lines.append("Limitaciones:")
         lines.extend(f"- {item}" for item in limitations)
     if len(lines) == 1:
-        lines.append("No encontre acciones suficientemente respaldadas por la evidencia disponible.")
+        lines.append("Todavia no tengo acciones suficientemente respaldadas por la evidencia disponible.")
     return "\n".join(lines)
 
 
@@ -853,7 +981,7 @@ def _business_follow_up_summary(artifact: dict[str, Any], period: str | None) ->
         lines.extend(f"- {item}" for item in facts[:3])
         lines.append("- Para avanzar, compara este periodo contra uno anterior equivalente y separa ventas genericas de clientes identificados.")
     if len(lines) == 1:
-        lines.append("No encontre un angulo nuevo suficientemente respaldado por la evidencia actual.")
+        lines.append("Con la evidencia actual no separo un angulo nuevo sin repetir o inventar; pideme comparar periodos, segmentos o clientes identificados.")
     return "\n".join(lines)
 
 
@@ -895,6 +1023,150 @@ def _product_follow_up_summary(artifact: dict[str, Any], rows: list[dict[str, An
         lines.append("")
         lines.append("Limitaciones:")
         lines.extend(f"- {item}" for item in limitations[:3])
+    return "\n".join(lines)
+
+
+def _product_diagnosis_summary(artifact: dict[str, Any], rows: list[dict[str, Any]], period: str | None) -> str:
+    analysis = artifact.get("analysis") if isinstance(artifact.get("analysis"), dict) else {}
+    plan = artifact.get("conversation_plan") if isinstance(artifact.get("conversation_plan"), dict) else {}
+    risks = _dedupe_text_items(_string_items(analysis.get("risks")))
+    patterns = _dedupe_text_items(_string_items(analysis.get("patterns")))
+    actions = _dedupe_text_items(_string_items(analysis.get("recommended_actions")))
+    limitations = _dedupe_text_items(
+        [
+            *_string_items(analysis.get("limitations")),
+            *_string_items(artifact.get("limitations")),
+        ]
+    )
+    negative_rows = [row for row in rows if _number(row.get("margin")) < 0]
+    cost_sources = _dedupe_text_items([str(row.get("cost_source")) for row in rows if row.get("cost_source")])
+    lines = [f"Mi lectura para {_period_label(period)}:"]
+    if negative_rows:
+        sample = negative_rows[:3]
+        lines.append(
+            "Hay margen negativo en productos de alto volumen; eso normalmente indica que el costo usado supera el precio/base de margen registrado."
+        )
+        lines.append("")
+        lines.append("Evidencia:")
+        for row in sample:
+            bits = _product_bits(row, include_margin=True, include_profit=False)
+            lines.append(f"- {_row_name(row, fallback='Producto')}" + (f": {', '.join(bits)}." if bits else "."))
+    elif patterns:
+        lines.append(patterns[0])
+    else:
+        lines.append("No veo una senal suficiente para explicar la causa solo con la evidencia actual.")
+    if cost_sources:
+        lines.append("")
+        lines.append("Fuente de costo:")
+        lines.append("- La consulta viene marcada como " + ", ".join(cost_sources[:3]) + ".")
+    if risks:
+        lines.append("")
+        lines.append("Riesgo:")
+        lines.extend(f"- {item}" for item in risks[:3])
+    if actions:
+        lines.append("")
+        lines.append("Que revisaria primero:")
+        lines.extend(f"- {item}" for item in actions[:3])
+    elif negative_rows:
+        lines.append("")
+        lines.append("Que revisaria primero:")
+        lines.append("- Comparar precio de venta, costo usado para margen y receta/costo cargado de los productos negativos.")
+        lines.append("- Validar si el costo real representa costo unitario correcto o si esta mezclando insumos, presentaciones o conversiones.")
+    if limitations:
+        lines.append("")
+        lines.append("Limitacion:")
+        lines.extend(f"- {item}" for item in limitations[:2])
+    if "repeat_full_ranking" in _string_items((plan.get("answer_contract") or {}).get("must_not")):
+        return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _product_cause_classification_summary(
+    artifact: dict[str, Any],
+    rows: list[dict[str, Any]],
+    period: str | None,
+) -> str:
+    negative_rows = [row for row in rows if _number(row.get("margin")) < 0]
+    positive_rows = [row for row in rows if _number(row.get("margin")) > 0]
+    cost_sources = _dedupe_text_items([str(row.get("cost_source")) for row in rows if row.get("cost_source")])
+    lines = [f"Mi lectura para {_period_label(period)}:"]
+
+    if negative_rows:
+        lines.append(
+            "No lo leeria primero como problema comercial de precio. La senal mas fuerte es costo o datos: "
+            "hay productos con volumen alto donde el margen queda negativo, lo que sugiere que el costo usado "
+            "esta por encima de la base de venta registrada."
+        )
+        lines.append("")
+        lines.append("Evidencia que pesa:")
+        for row in negative_rows[:3]:
+            bits = _product_bits(row, include_margin=True, include_profit=False)
+            lines.append(f"- {_row_name(row, fallback='Producto')}" + (f": {', '.join(bits)}." if bits else "."))
+    else:
+        lines.append(
+            "Con las filas actuales no veo margen negativo suficiente para culpar precio, costo o datos sin otra consulta."
+        )
+
+    if positive_rows:
+        lines.append("")
+        lines.append("Contraste util:")
+        for row in positive_rows[:2]:
+            bits = _product_bits(row, include_margin=True, include_profit=False)
+            lines.append(f"- {_row_name(row, fallback='Producto')}" + (f": {', '.join(bits)}." if bits else "."))
+
+    lines.append("")
+    lines.append("Como lo separaria:")
+    lines.append("- Precio: revisaria si el precio promedio vendido esta demasiado bajo frente al menu o descuentos.")
+    lines.append("- Costo: revisaria receta, conversiones y costo unitario de los productos con margen negativo.")
+    lines.append("- Datos: revisaria si el costo real esta mezclando presentaciones, insumos o unidades incompatibles.")
+    if cost_sources:
+        lines.append(f"- Fuente actual de costo en la evidencia: {', '.join(cost_sources[:3])}.")
+    return "\n".join(lines)
+
+
+def _generic_customer_impact_summary(
+    artifact: dict[str, Any],
+    rows: list[dict[str, Any]],
+    period: str | None,
+) -> str:
+    generic_rows = [
+        row
+        for row in rows
+        if "generic" in normalized_any(_row_name(row, fallback=""))
+        or "generico" in normalized_any(_row_name(row, fallback=""))
+        or "generica" in normalized_any(_row_name(row, fallback=""))
+    ]
+    total_orders = sum(_number(row.get("order_count") or row.get("orders_count")) for row in rows)
+    total_spent = sum(_number(row.get("total_spent") or row.get("revenue")) for row in rows)
+    generic_orders = sum(_number(row.get("order_count") or row.get("orders_count")) for row in generic_rows)
+    generic_spent = sum(_number(row.get("total_spent") or row.get("revenue")) for row in generic_rows)
+
+    lines = [f"Sobre clientes genericos para {_period_label(period)}:"]
+    if generic_rows:
+        lines.append(
+            "Si los genericos aparecen en ventas, deben incluirse: son evidencia de que una parte del negocio "
+            "no esta identificando al cliente real."
+        )
+        lines.append("")
+        lines.append("Impacto:")
+        if total_orders and generic_orders:
+            lines.append(f"- Concentracion de ordenes genericas: {_fmt_percent(generic_orders * 100 / total_orders)}.")
+        if total_spent and generic_spent:
+            lines.append(f"- Concentracion de venta generica: {_fmt_percent(generic_spent * 100 / total_spent)}.")
+        for row in generic_rows[:3]:
+            bits = _row_summary_bits(row)
+            lines.append(f"- {_row_name(row, fallback='Cliente generico')}" + (f": {', '.join(bits)}." if bits else "."))
+    else:
+        lines.append(
+            "La evidencia actual no trae filas claramente marcadas como cliente generico. Para cuantificar el impacto "
+            "necesito una consulta por cliente con ordenes, venta y ticket."
+        )
+
+    lines.append("")
+    lines.append("Por que importa:")
+    lines.append("- Distorsiona recompra: muchas compras parecen venir de un solo cliente falso o sin identificar.")
+    lines.append("- Distorsiona frecuencia: no sabemos quien realmente vuelve.")
+    lines.append("- Distorsiona segmentacion: RFM, fidelizacion y campanas pierden precision.")
     return "\n".join(lines)
 
 
@@ -1068,12 +1340,25 @@ def _limitations(plan: ToolPlan, failed: list[dict[str, Any]], tables: list[dict
 
 def _blocked_message(reason: str | None, plan: ToolPlan) -> str:
     if reason == "missing_coverage" and plan.missing_coverage:
-        return "No pude completar esta respuesta porque faltan datos requeridos: " + ", ".join(plan.missing_coverage)
+        return (
+            "Para responder con evidencia necesito datos que aun no estan cubiertos por las herramientas: "
+            + ", ".join(plan.missing_coverage)
+            + ". Puedo intentar una pregunta mas acotada o usar el ultimo contexto disponible."
+        )
     if reason == "no_compatible_tools":
-        return "No encontre herramientas compatibles para responder esa pregunta."
+        return (
+            "Esa pregunta no tiene una herramienta de datos compatible todavia. "
+            "Puedo ayudarte reformulandola hacia ventas, productos, margenes, clientes, WAROS o calidad de datos."
+        )
     if reason == "all_tools_failed":
-        return "No pude completar esta respuesta porque fallaron las herramientas requeridas."
-    return "No pude completar esta respuesta."
+        tool_names = [str(step.tool_name) for step in plan.steps if getattr(step, "tool_name", None)]
+        suffix = f" ({', '.join(tool_names[:3])})" if tool_names else ""
+        return (
+            "La consulta de datos necesaria fallo"
+            + suffix
+            + ". No voy a inventar la respuesta; prueba de nuevo o acota periodo, producto, cliente o metrica."
+        )
+    return "No tengo evidencia suficiente para responder sin inventar; puedo intentarlo con una consulta mas acotada."
 
 
 def _fmt_money(value: Any) -> str:
@@ -1083,6 +1368,35 @@ def _fmt_money(value: Any) -> str:
         return "$" + f"{float(value):,.0f}".replace(",", ".")
     except (TypeError, ValueError):
         return str(value)
+
+
+def _fmt_percent(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return f"{value}%"
+    if number.is_integer():
+        return f"{int(number)}%"
+    return f"{number:.1f}%"
+
+
+def _row_summary_bits(row: dict[str, Any]) -> list[str]:
+    bits: list[str] = []
+    quantity = row.get("quantity") or row.get("quantity_sold") or row.get("total_units_sold")
+    revenue = _fmt_money(row.get("revenue") or row.get("total_revenue") or row.get("total_spent"))
+    orders = row.get("order_count") or row.get("orders_count")
+    margin = row.get("margin") or row.get("margin_pct") or row.get("profit_margin_pct")
+    if quantity is not None:
+        bits.append(f"{quantity} unidades")
+    if orders is not None:
+        bits.append(f"{orders} ordenes")
+    if revenue:
+        bits.append(f"{revenue}")
+    if margin is not None:
+        bits.append(f"margen {_fmt_percent(margin)}")
+    if row.get("cost_source"):
+        bits.append(f"costo {row['cost_source']}")
+    return bits
 
 
 def _number(value: Any) -> float:
