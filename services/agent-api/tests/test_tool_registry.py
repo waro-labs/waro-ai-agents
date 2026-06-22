@@ -6,8 +6,8 @@ from app.config import Settings
 from app.tools.registry import ToolRegistry, set_tool_registry
 from app.tools.schema_v2 import (
     AGENT_SCHEMA_V2,
-    legacy_tool_to_v2_dict,
     parse_agent_catalog_payload,
+    static_tool_to_v2_dict,
     tool_schema_from_dict,
 )
 from app.tools.allowlist import TOOL_SPECS
@@ -50,9 +50,9 @@ def test_parse_agent_catalog_v2_envelope():
     assert tools[0].capabilities["entity"] == "ingredient"
 
 
-def test_legacy_tool_exports_v2_metadata():
+def test_static_tool_exports_v2_metadata():
     spec = TOOL_SPECS["waro.sales.metrics"]
-    exported = legacy_tool_to_v2_dict(spec)
+    exported = static_tool_to_v2_dict(spec)
     schema = tool_schema_from_dict(exported)
     assert schema is not None
     assert schema.name == "waro.sales.metrics"

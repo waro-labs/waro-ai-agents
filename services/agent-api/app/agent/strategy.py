@@ -89,12 +89,24 @@ def heuristic_answer_strategy(
     safe = bool(artifact.get("safe_to_answer", True))
     uses_context = _uses_context(normalized, conversation_state)
     avoid_repeating = bool(re.search(r"\b(que mas|otro|otra|profundiza|mas detalle|algo mas)\b", normalized))
+    conversation_plan = artifact.get("conversation_plan") if isinstance(artifact.get("conversation_plan"), dict) else {}
+    planned_intent = str(conversation_plan.get("intent_type") or "")
     if not safe:
         return AnswerStrategy(
             type="blocked",
             objective="Explicar por que no hay evidencia suficiente.",
             use_previous_artifact=uses_context,
             avoid_repeating=avoid_repeating,
+        )
+    if planned_intent in {"diagnosis", "data_quality_check"}:
+        return AnswerStrategy(
+            type="diagnosis",
+            objective="Explicar causa probable, incertidumbre de datos y siguiente verificacion.",
+            use_previous_artifact=bool(conversation_plan.get("reuse_previous_artifact", uses_context)),
+            avoid_repeating=True,
+            reasoning_focus=tuple(conversation_plan.get("required_evidence") or intent.measures),
+            confidence=float(conversation_plan.get("confidence") or 0.7),
+            source=str(conversation_plan.get("source") or "conversation_plan"),
         )
     if re.search(r"\b(que puedo hacer|acciones?|recomendaciones?|siguiente paso|como mejoro|que hago)\b", normalized):
         return AnswerStrategy(

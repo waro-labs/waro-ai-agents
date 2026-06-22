@@ -112,8 +112,8 @@ def parse_agent_catalog_payload(parsed: Any) -> tuple[str, list[AgentToolSchema]
     return "unknown", []
 
 
-def legacy_tool_to_v2_dict(spec: Any) -> dict[str, Any]:
-    """Export a legacy ToolSpec as a v2-compatible tool dict (for fallback catalog)."""
+def static_tool_to_v2_dict(spec: Any) -> dict[str, Any]:
+    """Export a static ToolSpec as a v2-compatible tool dict for the static catalog."""
     arguments_schema = spec.args_model.model_json_schema(by_alias=True)
     return {
         "name": spec.name,
@@ -126,7 +126,7 @@ def legacy_tool_to_v2_dict(spec: Any) -> dict[str, Any]:
         "capabilities": dict(spec.capabilities),
         "arguments": arguments_schema,
         "response": {
-            "shape": "legacy",
+            "shape": "static",
             "row_path": "",
             "fields": sorted(spec.allowed_fields),
             "default_fields": list(spec.default_fields),

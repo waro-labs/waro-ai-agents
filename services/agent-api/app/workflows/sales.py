@@ -353,26 +353,15 @@ class SalesWorkflow:
             )
 
             try:
-                if self.settings.agent_mode == "react":
-                    async for event in self._stream_via_graph(
-                        request=request,
-                        context=context,
-                        conversation_id=conversation_id,
-                        input_message_id=input_message_id,
-                        run_id=run_id,
-                        span=span,
-                    ):
-                        yield event
-                else:
-                    async for event in self._stream_legacy(
-                        request=request,
-                        context=context,
-                        conversation_id=conversation_id,
-                        input_message_id=input_message_id,
-                        run_id=run_id,
-                        span=span,
-                    ):
-                        yield event
+                async for event in self._stream_via_graph(
+                    request=request,
+                    context=context,
+                    conversation_id=conversation_id,
+                    input_message_id=input_message_id,
+                    run_id=run_id,
+                    span=span,
+                ):
+                    yield event
                 span.set_status(Status(StatusCode.OK))
             except Exception as exc:
                 span.record_exception(exc)
@@ -515,204 +504,8 @@ class SalesWorkflow:
             },
         )
 
-    async def _stream_legacy(
-        self,
-        *,
-        request: SalesQuestionRequest,
-        context: InternalRequestContext,
-        conversation_id: UUID,
-        input_message_id: UUID,
-        run_id: UUID,
-        span,
-    ) -> AsyncIterator[StreamEvent]:
-        yield stream_event(
-            "step_started",
-            run_id=run_id,
-            data={"step_type": "router", "name": "sales_intent_router"},
-        )
-        route_state = await self._route_sales(
-            {
-                "request": request,
-                "context": context,
-                "run_id": run_id,
-            }
-        )
-        sales_intent = route_state.get("sales_intent", "sales_metrics")
-        span.set_attribute("waro.sales.intent", sales_intent)
-        previous_context_summary = await self._load_latest_context_summary(
-            request=request,
-            context=context,
-        )
-        tool_calls: list[dict[str, Any]] = []
-        tool_plan: dict[str, Any] | None = None
-        if sales_intent == "sales_metrics":
-            plan = await self._plan_sales_tool_calls(
-                request=request,
-                context=context,
-                run_id=run_id,
-                previous_context_summary=previous_context_summary,
-            )
-            tool_plan = self._audit_tool_plan(plan)
-            async for event in self._stream_required_tools(
-                context=context,
-                run_id=run_id,
-                plan=plan,
-                tool_calls=tool_calls,
-            ):
-                yield event
-
-        artifact = self._build_artifact(
-            request=request,
-            tool_calls=tool_calls,
-            intent=sales_intent,
-            tool_plan=tool_plan,
-            previous_context_summary=previous_context_summary,
-        )
-        self._printf_step(
-            "analysis_artifact",
-            {
-                "run_id": str(run_id),
-                "intent": artifact.get("intent"),
-                "answer_style": artifact.get("answer_style"),
-                "analysis_area": (
-                    artifact.get("analysis_request", {}).get("area")
-                    if isinstance(artifact.get("analysis_request"), dict)
-                    else None
-                ),
-                "analysis_objective": (
-                    artifact.get("analysis_request", {}).get("objective")
-                    if isinstance(artifact.get("analysis_request"), dict)
-                    else None
-                ),
-                "request_kind": (
-                    artifact.get("response_contract", {}).get("request_kind")
-                    if isinstance(artifact.get("response_contract"), dict)
-                    else None
-                ),
-                "data_status": (
-                    artifact.get("response_contract", {}).get("data_status")
-                    if isinstance(artifact.get("response_contract"), dict)
-                    else None
-                ),
-                "safe_to_answer": (
-                    artifact.get("response_contract", {}).get("safe_to_answer")
-                    if isinstance(artifact.get("response_contract"), dict)
-                    else None
-                ),
-                "tool_count": len(tool_calls),
-            },
-        )
-        span.set_attribute("waro.answer.style", artifact.get("answer_style", ""))
-        span.set_attribute("waro.tool.call_count", len(tool_calls))
-        stream_analysis_request = (
-            artifact.get("analysis_request")
-            if isinstance(artifact.get("analysis_request"), dict)
-            else {}
-        )
-        stream_response_contract = (
-            artifact.get("response_contract")
-            if isinstance(artifact.get("response_contract"), dict)
-            else {}
-        )
-        span.set_attribute(
-            "waro.analysis.area",
-            str(stream_analysis_request.get("area", "")),
-        )
-        span.set_attribute(
-            "waro.analysis.objective",
-            str(stream_analysis_request.get("objective", "")),
-        )
-        self._set_response_contract_span_attributes(
-            span,
-            stream_response_contract,
-        )
-        span.add_event(
-            "response_contract.evaluated",
-            {
-                "waro.request.kind": str(
-                    stream_response_contract.get("request_kind", "")
-                ),
-                "waro.data.status": str(
-                    stream_response_contract.get("data_status", "")
-                ),
-                "waro.safe_to_answer": bool(
-                    stream_response_contract.get("safe_to_answer", False)
-                ),
-            },
-        )
-        if self.settings.llm_provider != "disabled" and self._should_use_llm(artifact):
-            summary_model = self._summary_model_for(artifact)
-            yield stream_event(
-                "llm_started",
-                run_id=run_id,
-                data={
-                    "provider": self.llm_adapter.provider,
-                    "model": summary_model
-                    if self.settings.llm_provider == "kimi"
-                    else None,
-                },
-            )
-        summary_holder: dict[str, str] = {}
-        async for event in self._stream_summary_with_llm(
-            artifact=artifact,
-            context=context,
-            run_id=run_id,
-            summary_holder=summary_holder,
-        ):
-            yield event
-        summary = summary_holder["summary"]
-        self._printf_step(
-            "answer_composer",
-            {
-                "run_id": str(run_id),
-                "summary_length": len(summary),
-                "used_llm": self._should_use_llm(artifact)
-                and self.settings.llm_provider != "disabled",
-            },
-        )
-        evals = evaluate_sales_artifact(artifact)
-        output_message_id = await self._finish_run(
-            context=context,
-            conversation_id=conversation_id,
-            input_message_id=input_message_id,
-            run_id=run_id,
-            artifact=artifact,
-            summary=summary,
-            evals=evals,
-        )
-        self._printf_step(
-            "run_completed",
-            {
-                "run_id": str(run_id),
-                "output_message_id": str(output_message_id),
-                "status": "completed",
-            },
-        )
-        yield stream_event(
-            "final",
-            run_id=run_id,
-            data={
-                "status": "completed",
-                "conversation_id": str(conversation_id),
-                "input_message_id": str(input_message_id),
-                "output_message_id": str(output_message_id),
-                "summary": summary,
-                "artifact_summary": self._stream_artifact_summary(artifact),
-                "evals": [
-                    {
-                        "evaluator_name": eval_result.evaluator_name,
-                        "score": eval_result.score,
-                        "passed": eval_result.passed,
-                    }
-                    for eval_result in evals
-                ],
-            },
-        )
-
     def _build_graph(self):
-        if self.settings.agent_mode == "react":
-            return self._build_react_graph()
-        return self._build_legacy_graph()
+        return self._build_react_graph()
 
     def _build_react_graph(self):
         graph = StateGraph(SalesGraphState)
@@ -725,33 +518,10 @@ class SalesWorkflow:
         graph.add_edge("finish_run", END)
         return graph.compile()
 
-    def _build_legacy_graph(self):
-        graph = StateGraph(SalesGraphState)
-        graph.add_node("route_sales", self._route_sales)
-        graph.add_node("call_sales_tools", self._call_sales_tools_node)
-        graph.add_node("build_artifact", self._build_artifact_node)
-        graph.add_node("finish_run", self._finish_run_node)
-        graph.add_edge(START, "route_sales")
-        graph.add_conditional_edges(
-            "route_sales",
-            self._next_after_route,
-            {
-                "call_sales_tools": "call_sales_tools",
-                "build_artifact": "build_artifact",
-            },
-        )
-        graph.add_edge("call_sales_tools", "build_artifact")
-        graph.add_edge("build_artifact", "finish_run")
-        graph.add_edge("finish_run", END)
-        return graph.compile()
-
     async def _route_sales(self, state: SalesGraphState) -> SalesGraphState:
         with self.tracer.start_as_current_span("sales.route_intent") as span:
             has_conversation_context = state["request"].conversation_id is not None
-            intent = self._resolve_sales_intent(
-                state["request"].question,
-                has_conversation_context=has_conversation_context,
-            )
+            intent = "kali_agent"
             self._printf_step(
                 "sales_intent_router",
                 {
@@ -759,7 +529,7 @@ class SalesWorkflow:
                     "intent": intent,
                     "has_conversation_context": has_conversation_context,
                     "question_length": len(state["request"].question),
-                    "tool_planned": intent == "sales_metrics",
+                    "tool_planned": True,
                 },
             )
             span.set_attribute("openinference.span.kind", "CHAIN")
@@ -767,7 +537,7 @@ class SalesWorkflow:
             span.set_attribute("waro.run_id", str(state["run_id"]))
             span.set_attribute("waro.tenant_id", state["context"].tenant_id)
             span.set_attribute("waro.sales.intent", intent)
-            span.set_attribute("waro.sales.tool_planned", intent == "sales_metrics")
+            span.set_attribute("waro.sales.tool_planned", True)
             span.set_attribute("waro.conversation.has_context", has_conversation_context)
             span.set_attribute("waro.request.question_length", len(state["request"].question))
             await self._record_step(
@@ -781,7 +551,7 @@ class SalesWorkflow:
                 },
                 output_json={
                     "intent": intent,
-                    "tool_planned": intent == "sales_metrics",
+                    "tool_planned": True,
                 },
                 output_summary=f"Routed request to {intent}.",
             )
@@ -789,29 +559,6 @@ class SalesWorkflow:
         return {"sales_intent": intent}
 
     async def _run_kali_agent_node(self, state: SalesGraphState) -> SalesGraphState:
-        intent = state.get("sales_intent", "sales_metrics")
-        if intent in {"small_talk", "follow_up"}:
-            previous_context_summary = state.get("previous_context_summary")
-            if previous_context_summary is None and intent == "follow_up":
-                previous_context_summary = await self._load_latest_context_summary(
-                    request=state["request"],
-                    context=state["context"],
-                )
-            artifact = self._build_artifact(
-                request=state["request"],
-                tool_calls=[],
-                intent=intent,
-                tool_plan=None,
-                previous_context_summary=previous_context_summary,
-            )
-            summary = self._build_summary(artifact)
-            return {
-                "artifact": artifact,
-                "summary": summary,
-                "evals": evaluate_sales_artifact(artifact),
-                "tool_calls": [],
-            }
-
         agent_artifact = await self.kali_runner.execute(
             question=state["request"].question,
             context=state["context"],
@@ -982,20 +729,10 @@ class SalesWorkflow:
                 },
             )
             span.set_status(Status(StatusCode.OK))
-        artifact_out = artifact
-        summary_out = summary
-        if self.settings.agent_mode == "shadow":
-            artifact_out = await self.kali_runner.execute_shadow(
-                question=state["request"].question,
-                context=state["context"],
-                run_id=state["run_id"],
-                conversation_id=state.get("conversation_id"),
-                legacy_artifact=artifact,
-            )
         return {
-            "artifact": artifact_out,
-            "summary": summary_out,
-            "evals": evaluate_sales_artifact(artifact_out),
+            "artifact": artifact,
+            "summary": summary,
+            "evals": evaluate_sales_artifact(artifact),
         }
 
     async def _finish_run_node(self, state: SalesGraphState) -> SalesGraphState:
@@ -3411,10 +3148,11 @@ class SalesWorkflow:
         if artifact.get("intent") == "follow_up":
             previous = str(artifact.get("previous_context_summary") or "").strip()
             if previous:
-                return f"Claro. Me referia a esto: {previous}"
+                return (
+                    "Puedo profundizar sobre el contexto anterior, separando evidencia, hipotesis y siguiente verificacion."
+                )
             return (
-                "Claro. Necesito un poco mas de contexto para explicar ese punto. "
-                "Preguntame sobre la ultima metrica, un producto, una fecha o un margen especifico."
+                "Puedo profundizar si hay contexto analitico previo o si indicas la metrica, producto, cliente o periodo."
             )
         metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
         answer_style = artifact.get("answer_style")

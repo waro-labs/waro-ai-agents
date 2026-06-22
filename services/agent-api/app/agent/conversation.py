@@ -22,6 +22,7 @@ class ConversationState:
     prior_insights: tuple[str, ...] = ()
     prior_actions: tuple[str, ...] = ()
     prior_limitations: tuple[str, ...] = ()
+    advisor_state: dict[str, Any] | None = None
     source: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
@@ -31,6 +32,7 @@ class ConversationState:
         payload["prior_insights"] = list(self.prior_insights)
         payload["prior_actions"] = list(self.prior_actions)
         payload["prior_limitations"] = list(self.prior_limitations)
+        payload["advisor_state"] = self.advisor_state or {}
         return payload
 
 
@@ -45,6 +47,8 @@ async def load_conversation_messages(
         return []
     message_limit = limit or settings.agent_conversation_message_limit
     async with connection_factory() as connection:
+        if not hasattr(connection, "fetch"):
+            return []
         rows = await connection.fetch(
             """
             SELECT role, content
@@ -74,6 +78,8 @@ async def load_conversation_state(
         return ConversationState()
     message_limit = max(3, settings.agent_conversation_message_limit)
     async with connection_factory() as connection:
+        if not hasattr(connection, "fetch"):
+            return ConversationState()
         rows = await connection.fetch(
             """
             SELECT role, content, content_sanitized, metadata
@@ -124,6 +130,12 @@ def _state_from_artifact(
     last_question: str | None,
     last_summary: str | None,
 ) -> ConversationState:
+    if _is_meta_conversation_artifact(artifact):
+        return ConversationState(
+            last_question=last_question or _string_or_none(artifact.get("question")),
+            last_summary=last_summary or _string_or_none(artifact.get("summary")),
+            source="messages",
+        )
     intent = artifact.get("question_intent") if isinstance(artifact.get("question_intent"), dict) else {}
     analysis = artifact.get("analysis") if isinstance(artifact.get("analysis"), dict) else {}
     strategy = artifact.get("answer_strategy")
@@ -141,6 +153,13 @@ def _state_from_artifact(
         last_summary=last_summary or _string_or_none(artifact.get("summary")),
         last_answer_strategy=strategy_name or None,
         last_artifact=_compact_artifact(artifact),
+        advisor_state=(
+            artifact.get("advisor_state")
+            if isinstance(artifact.get("advisor_state"), dict)
+            else artifact.get("advisor_state_update")
+            if isinstance(artifact.get("advisor_state_update"), dict)
+            else None
+        ),
         prior_insights=tuple(
             [
                 *_string_items(analysis.get("facts")),
@@ -176,10 +195,20 @@ def _compact_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
         if isinstance(artifact.get("ranked_rows"), list)
         else [],
         "analysis": artifact.get("analysis"),
+        "advisor_analysis": artifact.get("advisor_analysis"),
+        "advisor_state": artifact.get("advisor_state"),
         "limitations": artifact.get("limitations"),
         "answer_strategy": artifact.get("answer_strategy"),
         "summary": artifact.get("summary"),
     }
+
+
+def _is_meta_conversation_artifact(artifact: dict[str, Any]) -> bool:
+    plan = artifact.get("conversation_plan") if isinstance(artifact.get("conversation_plan"), dict) else {}
+    return (
+        plan.get("intent_type") in {"definition", "clarification"}
+        and plan.get("subject") == "kali_capabilities"
+    )
 
 
 def _string_items(value: Any) -> list[str]:

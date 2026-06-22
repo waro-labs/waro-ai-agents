@@ -22,7 +22,8 @@ async def compose_agent_summary(
         if not artifact.get("safe_to_answer"):
             return str(artifact.get("error_message") or fallback)
         return fallback
-    messages = compose_summary_messages(artifact=artifact)
+    prompt_artifact = {**artifact, "deterministic_summary": fallback}
+    messages = compose_summary_messages(artifact=prompt_artifact)
     try:
         response = await llm_adapter.complete(
             messages=messages,
@@ -30,10 +31,15 @@ async def compose_agent_summary(
             model=model_for(settings, step="compose", complexity=complexity),
         )
         content = response.content.strip()
-        if not content or _prefer_factual_fallback(artifact=artifact, content=content, fallback=fallback):
+        if not content:
+            _log_composer_fallback(artifact=artifact, reason="empty_content")
             return fallback
+        if _prefer_factual_fallback(artifact=artifact, content=content, fallback=fallback):
+            _log_composer_fallback(artifact=artifact, reason="factual_fallback_hybrid")
+            return _hybrid_summary(artifact=artifact, content=content, fallback=fallback)
         return content
-    except Exception:
+    except Exception as exc:
+        _log_composer_fallback(artifact=artifact, reason="exception", error_type=type(exc).__name__)
         return fallback
 
 
@@ -63,3 +69,41 @@ def _prefer_factual_fallback(*, artifact: dict[str, Any], content: str, fallback
     fallback_has_values = any(token in fallback for token in ("$", "%", " unidades", " ordenes"))
     content_has_values = any(token in content for token in ("$", "%", " unidades", " ordenes"))
     return fallback_has_values and not content_has_values
+
+
+def _hybrid_summary(*, artifact: dict[str, Any], content: str, fallback: str) -> str:
+    advisor = artifact.get("advisor_analysis") if isinstance(artifact.get("advisor_analysis"), dict) else {}
+    sections = [content.strip()]
+    notes = [
+        *_string_items(advisor.get("diagnosis")),
+        *_string_items(advisor.get("data_quality_notes")),
+        *_string_items(advisor.get("business_risks")),
+    ]
+    if notes and not any(note in content for note in notes[:2]):
+        sections.append("Lectura: " + " ".join(notes[:2]))
+    sections.append(fallback)
+    actions = _string_items(advisor.get("recommended_actions"))
+    if actions:
+        sections.append("Siguiente paso: " + actions[0])
+    return "\n\n".join(section for section in sections if section)
+
+
+def _string_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _log_composer_fallback(*, artifact: dict[str, Any], reason: str, error_type: str | None = None) -> None:
+    strategy = artifact.get("answer_strategy") if isinstance(artifact.get("answer_strategy"), dict) else {}
+    plan = artifact.get("conversation_plan") if isinstance(artifact.get("conversation_plan"), dict) else {}
+    payload = {
+        "reason": reason,
+        "error_type": error_type,
+        "strategy": strategy.get("type"),
+        "conversation_intent_type": plan.get("intent_type"),
+        "conversation_subject": plan.get("subject"),
+        "safe_to_answer": bool(artifact.get("safe_to_answer")),
+        "row_count": len(artifact.get("ranked_rows") or []) if isinstance(artifact.get("ranked_rows"), list) else 0,
+    }
+    print("[agent-api:composer] fallback " + json.dumps(payload, ensure_ascii=False), flush=True)

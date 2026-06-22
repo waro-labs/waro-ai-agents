@@ -313,6 +313,9 @@ def infer_time_range(normalized: str, *, today: date) -> TimeRange:
     if "ayer" in normalized:
         day = today - timedelta(days=1)
         return TimeRange(day.isoformat(), day.isoformat(), label="ayer")
+    if re.search(r"\b(ultimo ano|ultimos 365 dias|ultimo año|ultimos doce meses|ultimos 12 meses|del ultimo ano|del ultimo año)\b", normalized):
+        start = today - timedelta(days=365)
+        return TimeRange(start.isoformat(), today.isoformat(), label="ultimo año")
     if re.search(r"\b(este mes|presente mes|mes actual|del mes)\b", normalized):
         first = today.replace(day=1)
         return TimeRange(first.isoformat(), today.isoformat(), label="este mes")

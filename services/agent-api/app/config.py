@@ -56,8 +56,8 @@ class Settings(BaseSettings):
     kimi_analysis_model: str | None = Field(default=None, alias="KIMI_ANALYSIS_MODEL")
     kimi_composer_model: str | None = Field(default=None, alias="KIMI_COMPOSER_MODEL")
     llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
-    agent_mode: Literal["legacy", "shadow", "react"] = Field(
-        default="legacy",
+    agent_mode: Literal["react"] = Field(
+        default="react",
         alias="AGENT_MODE",
     )
     tool_catalog_source: Literal["cli", "static"] = Field(

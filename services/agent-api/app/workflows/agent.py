@@ -94,20 +94,18 @@ class AgentWorkflow:
         request: AgentQuestionRequest,
         context: InternalRequestContext,
     ) -> AsyncIterator[StreamEvent]:
-        if self.settings.agent_mode == "react":
-            async for event in self.sales_workflow.stream(
-                request=SalesQuestionRequest(
-                    question=request.question,
-                    conversation_id=request.conversation_id,
-                    date_from=request.date_from,
-                    date_to=request.date_to,
-                    group_by=request.group_by,
-                ),
-                context=context,
-            ):
-                yield event
-            return
-        route = await self._route_hybrid(request)
+        async for event in self.sales_workflow.stream(
+            request=SalesQuestionRequest(
+                question=request.question,
+                conversation_id=request.conversation_id,
+                date_from=request.date_from,
+                date_to=request.date_to,
+                group_by=request.group_by,
+            ),
+            context=context,
+        ):
+            yield event
+        return
         yield stream_event(
             "step_started",
             data={
@@ -275,33 +273,32 @@ class AgentWorkflow:
         context: InternalRequestContext,
         route: AgentRoute,
     ) -> AgentWorkflowResponse:
-        if self.settings.agent_mode == "react":
-            response = await self.sales_workflow.run(
-                request=SalesQuestionRequest(
-                    question=request.question,
-                    conversation_id=request.conversation_id,
-                    date_from=request.date_from,
-                    date_to=request.date_to,
-                    group_by=request.group_by,
-                ),
-                context=context,
-            )
-            return AgentWorkflowResponse(
-                conversation_id=response.conversation_id,
-                run_id=response.run_id,
-                input_message_id=response.input_message_id,
-                output_message_id=response.output_message_id,
-                status=response.status,
+        response = await self.sales_workflow.run(
+            request=SalesQuestionRequest(
+                question=request.question,
+                conversation_id=request.conversation_id,
+                date_from=request.date_from,
+                date_to=request.date_to,
+                group_by=request.group_by,
+            ),
+            context=context,
+        )
+        return AgentWorkflowResponse(
+            conversation_id=response.conversation_id,
+            run_id=response.run_id,
+            input_message_id=response.input_message_id,
+            output_message_id=response.output_message_id,
+            status=response.status,
+            workflow="sales",
+            route=AgentRoute(
                 workflow="sales",
-                route=AgentRoute(
-                    workflow="sales",
-                    confidence=1.0,
-                    reason="agent_mode_react_unified",
-                ),
-                artifact=response.artifact,
-                summary=response.summary,
-                evals=response.evals,
-            )
+                confidence=1.0,
+                reason="conversational_agent_unified",
+            ),
+            artifact=response.artifact,
+            summary=response.summary,
+            evals=response.evals,
+        )
         if route.workflow == "food_cost":
             response = await self.food_cost_workflow.run(
                 request=FoodCostQuestionRequest(
