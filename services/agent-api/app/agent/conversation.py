@@ -169,10 +169,14 @@ def _compact_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
         "question": artifact.get("question"),
         "question_intent": artifact.get("question_intent"),
         "metrics": artifact.get("metrics"),
+        "query_metadata": (artifact.get("query_metadata") or [])[:3]
+        if isinstance(artifact.get("query_metadata"), list)
+        else [],
         "ranked_rows": (artifact.get("ranked_rows") or [])[:10]
         if isinstance(artifact.get("ranked_rows"), list)
         else [],
         "analysis": artifact.get("analysis"),
+        "limitations": artifact.get("limitations"),
         "answer_strategy": artifact.get("answer_strategy"),
         "summary": artifact.get("summary"),
     }
