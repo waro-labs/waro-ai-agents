@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+import asyncio
 import json
 import re
 import unicodedata
@@ -144,6 +145,7 @@ class SalesGraphState(TypedDict, total=False):
     previous_context_summary: str | None
     complexity: str
     agent_observations: list[dict[str, Any]]
+    progress_callback: Any
 
 
 class SalesWorkflow:
@@ -403,20 +405,48 @@ class SalesWorkflow:
             run_id=run_id,
             data={"step_type": "agent", "name": "run_kali_agent"},
         )
-        state = await self.graph.ainvoke(
-            {
-                "request": request,
-                "context": context,
-                "conversation_id": conversation_id,
-                "input_message_id": input_message_id,
-                "run_id": run_id,
-            }
+        progress_queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+        live_tool_event_count = 0
+
+        async def progress_callback(event_name: str, data: dict[str, Any]) -> None:
+            nonlocal live_tool_event_count
+            if event_name in {"tool_started", "tool_finished"}:
+                live_tool_event_count += 1
+            await progress_queue.put(
+                stream_event(
+                    event_name,  # type: ignore[arg-type]
+                    run_id=run_id,
+                    data=data,
+                )
+            )
+
+        graph_task = asyncio.create_task(
+            self.graph.ainvoke(
+                {
+                    "request": request,
+                    "context": context,
+                    "conversation_id": conversation_id,
+                    "input_message_id": input_message_id,
+                    "run_id": run_id,
+                    "progress_callback": progress_callback,
+                }
+            )
         )
+        while not graph_task.done():
+            try:
+                yield await asyncio.wait_for(progress_queue.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+        while not progress_queue.empty():
+            yield progress_queue.get_nowait()
+        state = await graph_task
         artifact = state.get("artifact") or {}
         observations = artifact.get("observations") or state.get("agent_observations") or []
         tool_calls = state.get("tool_calls") or []
         event_source = observations if observations else tool_calls
         span.set_attribute("waro.tool.call_count", len(event_source))
+        if live_tool_event_count:
+            event_source = []
         for index, item in enumerate(event_source, start=1):
             if not isinstance(item, dict):
                 continue
@@ -564,6 +594,7 @@ class SalesWorkflow:
             context=state["context"],
             run_id=state["run_id"],
             conversation_id=state.get("conversation_id"),
+            progress_callback=state.get("progress_callback"),
         )
         tool_calls = [
             {

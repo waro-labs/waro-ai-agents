@@ -2225,3 +2225,58 @@ async def test_sales_workflow_stream_react_mode_uses_graph():
     ]
     assert events[-1].data["summary"] == "Respuesta agentica en stream"
     assert events[-1].data["artifact_summary"]["agent_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_sales_workflow_stream_react_mode_emits_live_agent_progress():
+    from app.workflows.sales import SalesWorkflow
+
+    @asynccontextmanager
+    async def connection_factory():
+        class FakeConnection:
+            async def fetchrow(self, query, *args):
+                return {"id": uuid4()}
+
+            async def execute(self, *args, **kwargs):
+                return None
+
+        yield FakeConnection()
+
+    workflow = SalesWorkflow(
+        settings=Settings(
+            AGENT_MODE="react",
+            TOOL_CATALOG_SOURCE="static",
+            LLM_PROVIDER="kimi",
+            KIMI_API_KEY="test",
+        ),
+        gateway=FakeGateway(),
+        llm_adapter=ToolReasoningLLM(),
+        connection_factory=connection_factory,
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-react-stream-progress",
+        member_id=None,
+        scopes=("orders:read", "financial:read", "menu:read", "customers:read", "analytics:read"),
+    )
+
+    events = [
+        event
+        async for event in workflow.stream(
+            request=type("Req", (), {"question": "dame ventas de ayer", "conversation_id": None})(),
+            context=context,
+        )
+    ]
+    names = [event.event for event in events]
+
+    assert "agent_step" in names
+    assert "llm_started" in names
+    assert "tool_started" in names
+    assert "tool_finished" in names
+    assert names.index("agent_step") < names.index("final")
+    assert names.index("tool_started") < names.index("final")
+    assert any(
+        event.event == "agent_step" and event.data.get("name") == "select_tools"
+        for event in events
+    )
