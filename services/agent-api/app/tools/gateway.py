@@ -46,7 +46,7 @@ class ToolGateway:
                 detail={"error": "unknown_tool", "tool_name": request.tool_name},
             )
 
-        if spec.scope not in context.scopes:
+        if not _scope_allowed(tool_name=spec.name, scope=spec.scope, scopes=context.scopes):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"error": "missing_scope", "required_scope": spec.scope},
@@ -216,3 +216,9 @@ class ToolGateway:
             "data_count": None,
             "products_count": None,
         }
+
+
+def _scope_allowed(*, tool_name: str, scope: str, scopes: tuple[str, ...]) -> bool:
+    if scope in scopes:
+        return True
+    return tool_name == "waro.queries.schema" and scope == "read" and "dataset_scope" in scopes

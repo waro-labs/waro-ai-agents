@@ -73,14 +73,25 @@ async def test_tool_registry_loads_static_fallback():
 
 @pytest.mark.asyncio
 async def test_tool_registry_merges_dynamic_cli_tool(monkeypatch):
+    dynamic_tools = [
+        ("waro.inventory.stock", ["inventory", "stock"], "inventory", "inventory:read"),
+        ("waro.purchases.items", ["purchases", "items"], "purchases", "purchases:read"),
+        ("waro.suppliers.list", ["suppliers", "list"], "suppliers", "suppliers:read"),
+        (
+            "waro.procurement.recommendations",
+            ["procurement", "recommendations"],
+            "procurement",
+            "procurement:read",
+        ),
+    ]
     payload = {
         "schema_version": AGENT_SCHEMA_V2,
         "tools": [
             {
-                "name": "waro.inventory.stock",
-                "command": ["inventory", "stock"],
-                "scope": "inventory:read",
-                "domain": "inventory",
+                "name": name,
+                "command": command,
+                "scope": scope,
+                "domain": domain,
                 "description": "Stock levels",
                 "capabilities": {"entity": "ingredient", "measures": ["quantity"]},
                 "arguments": {"type": "object", "properties": {}},
@@ -92,6 +103,7 @@ async def test_tool_registry_merges_dynamic_cli_tool(monkeypatch):
                     "top_level_keys": [],
                 },
             }
+            for name, command, domain, scope in dynamic_tools
         ],
     }
 
@@ -103,8 +115,9 @@ async def test_tool_registry_merges_dynamic_cli_tool(monkeypatch):
     monkeypatch.setattr(ToolRegistry, "_load_cli_schema", fake_load)
     snapshot = await registry.refresh(force=True)
     assert snapshot.source == "cli"
-    assert "waro.inventory.stock" in snapshot.tools
-    assert snapshot.tools["waro.inventory.stock"].domain == "inventory"
+    for name, _command, domain, _scope in dynamic_tools:
+        assert name in snapshot.tools
+        assert snapshot.tools[name].domain == domain
     assert "waro.sales.metrics" in snapshot.tools
 
 

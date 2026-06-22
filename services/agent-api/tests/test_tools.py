@@ -14,7 +14,7 @@ from app.dependencies.internal_auth import InternalRequestContext, require_inter
 from app.tools.allowlist import coerce_args, get_tool_spec, resolve_fields
 from app.tools.audit import ToolCallAudit
 from app.tools.catalog import candidate_tools, discover_tools, tool_catalog
-from app.tools.gateway import ToolGateway
+from app.tools.gateway import ToolGateway, _scope_allowed
 from app.tools.models import ToolCallRequest
 from app.tools.planner import ToolPlanner
 from app.tools.runner import ToolRunError, ToolRunResult, WaroCliRunner
@@ -177,6 +177,19 @@ def test_tool_discovery_records_relevant_tools_rejected_by_scope():
     rejected_by_name = {tool["name"]: tool for tool in discovery["rejected"]}
     assert rejected_by_name["waro.financial.products"]["rejected_reason"] == (
         "missing_scope:financial:read"
+    )
+
+
+def test_gateway_allows_query_schema_discovery_with_dataset_scope_only():
+    assert _scope_allowed(
+        tool_name="waro.queries.schema",
+        scope="read",
+        scopes=("dataset_scope",),
+    )
+    assert not _scope_allowed(
+        tool_name="waro.sales.list",
+        scope="read",
+        scopes=("dataset_scope",),
     )
 
 
