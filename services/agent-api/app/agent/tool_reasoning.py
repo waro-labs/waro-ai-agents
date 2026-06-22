@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,7 @@ from app.tools.sanitize import sanitize_value
 MAX_TOOL_CALLS = 4
 MAX_PROMPT_TOOLS = 5
 TRACER = trace.get_tracer(__name__)
+ProgressCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 async def run_tool_reasoning_agent(
@@ -37,10 +38,24 @@ async def run_tool_reasoning_agent(
     run_id: UUID,
     conversation_messages: list[dict[str, str]] | None,
     complexity: Complexity,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     tools = await _available_tools(registry=registry, scopes=context.scopes)
     transcript: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
+    initial_prompt_tools = _prompt_tools(question=question, tools=tools, observations=observations)
+    await _emit_progress(
+        progress_callback,
+        "agent_step",
+        {
+            "step_type": "agent",
+            "name": "select_tools",
+            "status": "completed",
+            "available_tool_count_full": len(tools),
+            "available_tool_count_prompt": len(initial_prompt_tools),
+            "selected_tools": list(initial_prompt_tools.keys()),
+        },
+    )
     messages = _planning_messages(
         question=question,
         tools=tools,
@@ -49,6 +64,15 @@ async def run_tool_reasoning_agent(
     )
 
     for step_index in range(MAX_TOOL_CALLS):
+        await _emit_progress(
+            progress_callback,
+            "llm_started",
+            {
+                "step_type": "llm",
+                "name": "tool_reasoning_plan",
+                "step_index": step_index + 1,
+            },
+        )
         decision = await _complete_json(
             settings=settings,
             llm_adapter=llm_adapter,
@@ -75,6 +99,15 @@ async def run_tool_reasoning_agent(
             )
         else:
             arguments = _clean_arguments(arguments=arguments, tool=tools[tool_name])
+            await _emit_progress(
+                progress_callback,
+                "tool_started",
+                {
+                    "tool_name": tool_name,
+                    "reason": "agent_tool_call",
+                    "step_index": step_index + 1,
+                },
+            )
             try:
                 response = await gateway.call(
                     request=ToolCallRequest(
@@ -96,6 +129,19 @@ async def run_tool_reasoning_agent(
                         "error": response.error,
                     }
                 )
+                await _emit_progress(
+                    progress_callback,
+                    "tool_finished",
+                    {
+                        "tool_name": response.tool_name,
+                        "status": response.status,
+                        "tool_call_id": str(response.tool_call_id)
+                        if response.tool_call_id
+                        else None,
+                        "result_summary": response.result_summary,
+                        "error_type": _progress_error_type(response.error),
+                    },
+                )
             except HTTPException as exc:
                 observations.append(
                     {
@@ -111,6 +157,16 @@ async def run_tool_reasoning_agent(
                         },
                     }
                 )
+                await _emit_progress(
+                    progress_callback,
+                    "tool_finished",
+                    {
+                        "tool_name": tool_name,
+                        "status": "failed",
+                        "result_summary": None,
+                        "error_type": "HTTPException",
+                    },
+                )
             except Exception as exc:
                 observations.append(
                     {
@@ -123,6 +179,16 @@ async def run_tool_reasoning_agent(
                         "error": {"message": str(exc), "type": type(exc).__name__},
                     }
                 )
+                await _emit_progress(
+                    progress_callback,
+                    "tool_finished",
+                    {
+                        "tool_name": tool_name,
+                        "status": "failed",
+                        "result_summary": None,
+                        "error_type": type(exc).__name__,
+                    },
+                )
         transcript.append({"step": step_index + 1, "decision": decision, "observation": observations[-1]})
         messages = _planning_messages(
             question=question,
@@ -131,6 +197,16 @@ async def run_tool_reasoning_agent(
             observations=observations,
         )
 
+    await _emit_progress(
+        progress_callback,
+        "agent_step",
+        {
+            "step_type": "agent",
+            "name": "compose_answer",
+            "status": "started",
+            "observation_count": len(observations),
+        },
+    )
     summary = await _final_answer(
         settings=settings,
         llm_adapter=llm_adapter,
@@ -623,3 +699,21 @@ def _prompt_tools_stats(messages: list[LLMMessage]) -> tuple[int, int]:
             return 0, 0
         return len(tools), len(json.dumps(tools, ensure_ascii=False, default=str))
     return 0, 0
+
+
+async def _emit_progress(
+    callback: ProgressCallback | None,
+    event: str,
+    data: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    await callback(event, sanitize_value(data))
+
+
+def _progress_error_type(error: Any) -> str | None:
+    if not error:
+        return None
+    if isinstance(error, dict):
+        return str(error.get("type") or error.get("error") or error.get("code") or "tool_error")
+    return type(error).__name__

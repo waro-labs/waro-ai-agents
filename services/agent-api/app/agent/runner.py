@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import UUID
 
 from app.agent.classifier import classify_complexity
@@ -14,6 +14,9 @@ from app.llm.base import LLMAdapter
 from app.llm.model_router import Complexity
 from app.tools import ToolGateway
 from app.tools.registry import ToolRegistry
+
+
+ProgressCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class KaliAgentRunner:
@@ -45,7 +48,13 @@ class KaliAgentRunner:
         context: InternalRequestContext,
         run_id: UUID,
         conversation_id: UUID | None,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        await self._emit_progress(
+            progress_callback,
+            "agent_step",
+            {"step_type": "agent", "name": "load_context", "status": "started"},
+        )
         conversation_messages = await load_conversation_messages(
             settings=self.settings,
             connection_factory=self.connection_factory,
@@ -56,6 +65,21 @@ class KaliAgentRunner:
             connection_factory=self.connection_factory,
             conversation_id=conversation_id,
         )
+        await self._emit_progress(
+            progress_callback,
+            "agent_step",
+            {
+                "step_type": "agent",
+                "name": "load_context",
+                "status": "completed",
+                "conversation_message_count": len(conversation_messages),
+            },
+        )
+        await self._emit_progress(
+            progress_callback,
+            "llm_started",
+            {"step_type": "llm", "name": "classify_complexity"},
+        )
         classification = await classify_complexity(
             settings=self.settings,
             llm_adapter=self.llm_adapter,
@@ -63,6 +87,16 @@ class KaliAgentRunner:
             conversation_messages=conversation_messages,
         )
         complexity: Complexity = classification["complexity"]
+        await self._emit_progress(
+            progress_callback,
+            "agent_step",
+            {
+                "step_type": "agent",
+                "name": "classify_complexity",
+                "status": "completed",
+                "complexity": complexity,
+            },
+        )
         if self.settings.llm_provider != "disabled":
             try:
                 artifact = await run_tool_reasoning_agent(
@@ -75,6 +109,7 @@ class KaliAgentRunner:
                     run_id=run_id,
                     conversation_messages=conversation_messages,
                     complexity=complexity,
+                    progress_callback=progress_callback,
                 )
                 artifact["classification"] = classification
                 return artifact
@@ -118,3 +153,13 @@ class KaliAgentRunner:
         )
         artifact["summary"] = summary
         return artifact
+
+    async def _emit_progress(
+        self,
+        callback: ProgressCallback | None,
+        event: str,
+        data: dict[str, Any],
+    ) -> None:
+        if callback is None:
+            return
+        await callback(event, data)
