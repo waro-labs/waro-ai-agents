@@ -17,6 +17,7 @@ from app.agent.loop import AgentLoop
 from app.agent.plan import ToolPlan, ToolPlanStep, build_tool_plan
 from app.agent.profiles import profile_for_intent, rows_for_group
 from app.agent.strategy import heuristic_answer_strategy
+from app.agent.tool_reasoning import _planning_messages
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
 from app.llm.base import LLMError, LLMMessage, LLMResponse
@@ -1887,6 +1888,56 @@ async def test_kali_runner_uses_tool_reasoning_agent_when_llm_enabled():
     assert artifact["agent_engine_version"] == "tool-reasoning-v1"
     assert artifact["summary"] == "Respuesta conversacional desde herramienta, sin resumen deterministico."
     assert artifact["observations"][0]["tool_name"] == "waro.sales.metrics"
+
+
+def test_tool_reasoning_planner_uses_compact_tool_prompt():
+    tools = {}
+    for index in range(8):
+        name = f"waro.test.tool_{index}"
+        tools[name] = {
+            "name": name,
+            "description": "Herramienta de ventas con schema grande",
+            "scope": "orders:read",
+            "domain": "sales",
+            "default_fields": ["revenue", "orders_count"],
+            "allowed_fields": [f"field_{field}" for field in range(50)],
+            "arguments_schema": {
+                "type": "object",
+                "required": ["period"],
+                "properties": {f"arg_{arg}": {"type": "string"} for arg in range(40)},
+            },
+            "capabilities": {"supported_operations": ["aggregate", "group"]},
+        }
+    tools["waro.queries.run"] = {
+        "name": "waro.queries.run",
+        "description": "Ejecuta QuerySpec analitico",
+        "scope": "analytics:read",
+        "domain": "analytics",
+        "default_fields": ["product", "quantity_sold", "profit_margin_pct", "revenue"],
+        "allowed_fields": ["product", "quantity_sold", "profit_margin_pct", "revenue"],
+        "arguments_schema": {
+            "type": "object",
+            "required": ["spec"],
+            "properties": {"spec": {"type": "string"}},
+        },
+        "capabilities": {"datasets": ["product_profitability"]},
+        "queryspec_contract": {"datasets": {"product_profitability": {"dimensions": ["product"]}}},
+    }
+
+    messages = _planning_messages(
+        question="cuales son mis productos mas vendidos y que margen dejan",
+        tools=tools,
+        conversation_messages=[],
+        observations=[],
+    )
+    payload = json.loads(messages[1].content)
+
+    assert len(payload["available_tools"]) <= 5
+    assert "waro.queries.run" in payload["available_tools"]
+    assert "arguments_schema" not in messages[1].content
+    assert "arg_39" not in messages[1].content
+    assert "field_49" not in messages[1].content
+    assert payload["available_tools"]["waro.queries.run"]["arguments"]["required"] == ["spec"]
 
 
 @pytest.mark.asyncio
