@@ -16,11 +16,13 @@ from app.llm.base import LLMAdapter, LLMMessage, LLMResponse
 from app.llm.model_router import Complexity, model_for
 from app.telemetry import mark_span_error
 from app.tools import ToolCallRequest, ToolGateway
+from app.tools.catalog import normalize_query
 from app.tools.registry import ToolRegistry
 from app.tools.sanitize import sanitize_value
 
 
 MAX_TOOL_CALLS = 4
+MAX_PROMPT_TOOLS = 5
 TRACER = trace.get_tracer(__name__)
 
 
@@ -277,11 +279,12 @@ def _planning_messages(
     conversation_messages: list[dict[str, str]],
     observations: list[dict[str, Any]],
 ) -> list[LLMMessage]:
+    prompt_tools = _prompt_tools(question=question, tools=tools, observations=observations)
     payload = {
         "question": question,
         "current_date": _current_date_payload(),
         "conversation_messages": conversation_messages[-8:],
-        "available_tools": tools,
+        "available_tools": prompt_tools,
         "observations": observations,
     }
     return [
@@ -330,7 +333,10 @@ async def _complete_json(
             phase="plan",
         )
         span.set_attribute("waro.tool_reasoning.step_index", step_index)
-        span.set_attribute("waro.tool_reasoning.available_tool_count", available_tool_count)
+        span.set_attribute("waro.tool_reasoning.available_tool_count_full", available_tool_count)
+        prompt_tool_count, prompt_tools_chars = _prompt_tools_stats(messages)
+        span.set_attribute("waro.tool_reasoning.available_tool_count_prompt", prompt_tool_count)
+        span.set_attribute("waro.tool_reasoning.available_tools_prompt_char_count", prompt_tools_chars)
         span.set_attribute("waro.tool_reasoning.observation_count", observation_count)
         try:
             response = await llm_adapter.complete(
@@ -477,3 +483,143 @@ def _current_date_payload() -> dict[str, str]:
     timezone = "America/Bogota"
     now = datetime.now(ZoneInfo(timezone))
     return {"date": now.date().isoformat(), "timezone": timezone}
+
+
+def _prompt_tools(
+    *,
+    question: str,
+    tools: dict[str, dict[str, Any]],
+    observations: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    selected_names = _select_prompt_tool_names(question=question, tools=tools, observations=observations)
+    return {name: _compact_tool_for_prompt(tools[name]) for name in selected_names if name in tools}
+
+
+def _select_prompt_tool_names(
+    *,
+    question: str,
+    tools: dict[str, dict[str, Any]],
+    observations: list[dict[str, Any]],
+) -> list[str]:
+    observed = [
+        str(observation.get("tool_name"))
+        for observation in observations
+        if observation.get("tool_name") in tools
+    ]
+    scored = sorted(
+        ((_tool_prompt_score(question, tool), name) for name, tool in tools.items()),
+        key=lambda item: (-item[0], item[1]),
+    )
+    names: list[str] = []
+    for name in observed:
+        if name not in names:
+            names.append(name)
+    for score, name in scored:
+        if len(names) >= MAX_PROMPT_TOOLS:
+            break
+        if score <= 0 and names:
+            continue
+        if name not in names:
+            names.append(name)
+    if not names:
+        names = [name for _, name in scored[:MAX_PROMPT_TOOLS]]
+    return names[:MAX_PROMPT_TOOLS]
+
+
+def _tool_prompt_score(question: str, tool: dict[str, Any]) -> int:
+    normalized_question = normalize_query(question)
+    haystack_parts = [
+        str(tool.get("name") or ""),
+        str(tool.get("description") or ""),
+        str(tool.get("domain") or ""),
+        " ".join(str(field) for field in tool.get("default_fields") or []),
+        " ".join(str(field) for field in tool.get("allowed_fields") or []),
+        json.dumps(tool.get("capabilities") or {}, ensure_ascii=False, default=str),
+    ]
+    normalized_haystack = normalize_query(" ".join(haystack_parts))
+    score = 0
+    for token in set(normalized_question.split()):
+        if len(token) >= 3 and token in normalized_haystack:
+            score += 1
+    product_or_margin_question = any(
+        term in normalized_question
+        for term in (
+            "producto",
+            "productos",
+            "margen",
+            "margenes",
+            "rentabilidad",
+            "generico",
+            "genericos",
+            "cliente",
+            "clientes",
+        )
+    )
+    if tool.get("name") == "waro.queries.run" and product_or_margin_question:
+        score += 8
+    if tool.get("name") == "waro.financial.products" and product_or_margin_question:
+        score += 7
+    if tool.get("domain") == "sales" and any(
+        term in normalized_question for term in ("venta", "ventas", "ingreso", "ingresos", "ticket")
+    ):
+        score += 4
+    if tool.get("domain") == "analytics" and any(
+        term in normalized_question for term in ("food", "costo", "costos", "churn", "cohorte", "rfm")
+    ):
+        score += 4
+    return score
+
+
+def _compact_tool_for_prompt(tool: dict[str, Any]) -> dict[str, Any]:
+    schema = tool.get("arguments_schema") if isinstance(tool.get("arguments_schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    optional_args = [key for key in properties.keys() if key not in required]
+    payload: dict[str, Any] = {
+        "name": tool.get("name"),
+        "description": tool.get("description"),
+        "scope": tool.get("scope"),
+        "domain": tool.get("domain"),
+        "arguments": {
+            "required": list(required),
+            "optional": optional_args[:12],
+        },
+        "default_fields": list(tool.get("default_fields") or [])[:12],
+        "allowed_fields": list(tool.get("allowed_fields") or [])[:16],
+        "capabilities": _compact_capabilities(tool.get("capabilities")),
+    }
+    if tool.get("queryspec_contract"):
+        payload["queryspec_contract"] = tool["queryspec_contract"]
+    return payload
+
+
+def _compact_capabilities(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 2:
+        if isinstance(value, dict):
+            return list(value.keys())[:12]
+        if isinstance(value, list):
+            return value[:12]
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_capabilities(item, depth=depth + 1)
+            for key, item in list(value.items())[:12]
+        }
+    if isinstance(value, list):
+        return [_compact_capabilities(item, depth=depth + 1) for item in value[:12]]
+    return value
+
+
+def _prompt_tools_stats(messages: list[LLMMessage]) -> tuple[int, int]:
+    for message in reversed(messages):
+        if message.role != "user":
+            continue
+        try:
+            payload = json.loads(message.content)
+        except json.JSONDecodeError:
+            return 0, 0
+        tools = payload.get("available_tools") if isinstance(payload, dict) else None
+        if not isinstance(tools, dict):
+            return 0, 0
+        return len(tools), len(json.dumps(tools, ensure_ascii=False, default=str))
+    return 0, 0
