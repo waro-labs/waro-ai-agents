@@ -95,7 +95,7 @@ DATASET_RULES: dict[str, QueryDatasetRule] = {
         dimensions=frozenset({"product", "product_id", "category", "day"}),
     ),
     "customers": QueryDatasetRule(
-        measures=frozenset({"order_count", "total_spent", "avg_ticket", "waros_balance"}),
+        measures=frozenset({"order_count", "total_spent", "avg_ticket", "last_order_date", "waros_balance"}),
         dimensions=frozenset({"customer", "customer_id", "day"}),
     ),
     "product_profitability": QueryDatasetRule(
@@ -123,9 +123,29 @@ def query_tool_requested(capability: Any) -> bool:
     return is_query_tool(str(getattr(capability, "tool_name", "")))
 
 
+def query_dataset_rules_from_capability(capability: Any) -> dict[str, QueryDatasetRule]:
+    raw = _capability_payload(capability)
+    for payload in _queryspec_contract_payloads(raw):
+        datasets = payload.get("datasets")
+        if isinstance(datasets, dict):
+            rules = _dataset_rules_from_mapping(datasets)
+            if rules:
+                return rules
+    return {}
+
+
+def query_dataset_rules_for_capability(capability: Any) -> dict[str, QueryDatasetRule]:
+    return query_dataset_rules_from_capability(capability) or DATASET_RULES
+
+
+def query_dataset_rule_source(capability: Any) -> str:
+    return "schema" if query_dataset_rules_from_capability(capability) else "fallback"
+
+
 def build_queryspec_for_intent(intent: QuestionIntent, capability: Any) -> dict[str, Any]:
-    dataset = _dataset_for_intent(intent)
-    rule = DATASET_RULES[dataset]
+    rules = query_dataset_rules_for_capability(capability)
+    dataset = _dataset_for_intent(intent, rules=rules)
+    rule = rules[dataset]
     measures = _query_measures(intent, rule=rule, capability=capability)
     dimensions = _query_dimensions(intent, rule=rule)
     order_field = _order_field(intent, measures=measures, rule=rule)
@@ -137,25 +157,26 @@ def build_queryspec_for_intent(intent: QuestionIntent, capability: Any) -> dict[
         "order_by": [{"field": order_field, "direction": "desc"}],
         "limit": 20,
     }
-    if intent.time_range.date_from or intent.time_range.date_to:
+    if "date_range" in rule.filters and (intent.time_range.date_from or intent.time_range.date_to):
         spec["filters"]["date_range"] = {
             "from": intent.time_range.date_from,
             "to": intent.time_range.date_to,
         }
-    return validate_queryspec(spec).model_dump(by_alias=True, mode="json", exclude_none=True)
+    return validate_queryspec(spec, rules=rules).model_dump(by_alias=True, mode="json", exclude_none=True)
 
 
-def validate_queryspec_payload(value: Any) -> QuerySpec:
+def validate_queryspec_payload(value: Any, *, rules: dict[str, QueryDatasetRule] | None = None) -> QuerySpec:
     raw = _parse_queryspec_payload(value)
-    return validate_queryspec(raw)
+    return validate_queryspec(raw, rules=rules)
 
 
-def validate_queryspec(value: dict[str, Any]) -> QuerySpec:
+def validate_queryspec(value: dict[str, Any], *, rules: dict[str, QueryDatasetRule] | None = None) -> QuerySpec:
     try:
         spec = QuerySpec.model_validate(value)
     except ValidationError as exc:
         raise QuerySpecValidationError(_validation_reason(exc)) from exc
-    rule = DATASET_RULES.get(spec.dataset)
+    active_rules = rules or DATASET_RULES
+    rule = active_rules.get(spec.dataset)
     if rule is None:
         raise QuerySpecValidationError(f"invalid_dataset:{spec.dataset}")
     _require_allowed("measure", spec.measures, rule.measures)
@@ -170,15 +191,23 @@ def validate_queryspec(value: dict[str, Any]) -> QuerySpec:
     return spec
 
 
-def query_trace_attributes_from_args(arguments: dict[str, Any], *, valid: bool, rejected_reason: str = "") -> dict[str, Any]:
+def query_trace_attributes_from_args(
+    arguments: dict[str, Any],
+    *,
+    valid: bool,
+    rejected_reason: str = "",
+    rules: dict[str, QueryDatasetRule] | None = None,
+    source: str = "fallback",
+) -> dict[str, Any]:
     try:
-        spec = validate_queryspec_payload(arguments.get("spec"))
+        spec = validate_queryspec_payload(arguments.get("spec"), rules=rules)
         return {
             "waro.queries.dataset": spec.dataset,
             "waro.queries.measures": ",".join(spec.measures),
             "waro.queries.dimensions": ",".join(spec.dimensions),
             "waro.queries.valid": valid,
             "waro.queries.rejected_reason": rejected_reason,
+            "waro.queries.schema_source": source,
         }
     except QuerySpecValidationError as exc:
         raw = _parse_queryspec_payload(arguments.get("spec"), strict=False)
@@ -188,11 +217,19 @@ def query_trace_attributes_from_args(arguments: dict[str, Any], *, valid: bool, 
             "waro.queries.dimensions": ",".join(str(item) for item in _list(raw.get("dimensions"))),
             "waro.queries.valid": False,
             "waro.queries.rejected_reason": rejected_reason or exc.reason,
+            "waro.queries.schema_source": source,
         }
 
 
-def _dataset_for_intent(intent: QuestionIntent) -> str:
+def _dataset_for_intent(intent: QuestionIntent, *, rules: dict[str, QueryDatasetRule]) -> str:
     measures = set(intent.measures)
+    if intent.entity in {"ingredient", "inventory"}:
+        if "inventory_stock" in rules and not measures.intersection({"movement_count", "net_quantity"}):
+            return "inventory_stock"
+        if "inventory_movements" in rules:
+            return "inventory_movements"
+    if intent.entity in {"purchase", "supplier", "procurement"} and "purchase_items" in rules:
+        return "purchase_items"
     if intent.entity == "customer":
         return "customers"
     if intent.entity == "product" and measures.intersection(
@@ -206,7 +243,7 @@ def _dataset_for_intent(intent: QuestionIntent) -> str:
         }
     ):
         return "product_profitability"
-    return "sales_items"
+    return "sales_items" if "sales_items" in rules else next(iter(rules))
 
 
 def _query_measures(intent: QuestionIntent, *, rule: QueryDatasetRule, capability: Any) -> list[str]:
@@ -231,6 +268,10 @@ def _query_dimensions(intent: QuestionIntent, *, rule: QueryDatasetRule) -> list
         candidates.insert(0, "customer")
     if intent.entity == "sale":
         candidates.insert(0, "day")
+    if intent.entity in {"ingredient", "inventory"}:
+        candidates.insert(0, "ingredient")
+    if intent.entity == "supplier":
+        candidates.insert(0, "supplier")
     return [item for item in _dedupe(candidates) if item in rule.dimensions][:3]
 
 
@@ -267,6 +308,16 @@ def _canonical_query_measures(value: str) -> list[str]:
         "total_sales": ["revenue"],
         "total_revenue": ["revenue"],
         "total_orders": ["order_count", "orders_count"],
+        "stock": ["current_stock", "quantity", "stock_value"],
+        "current_stock": ["current_stock", "quantity"],
+        "low_stock": ["current_stock", "minimum_stock"],
+        "minimum_stock": ["minimum_stock"],
+        "quantity_purchased": ["quantity_purchased"],
+        "purchase_count": ["purchase_count"],
+        "movement_count": ["movement_count"],
+        "net_quantity": ["net_quantity"],
+        "unit_cost": ["unit_cost", "avg_unit_cost"],
+        "total_cost": ["total_cost"],
     }
     return aliases.get(normalized, [normalized])
 
@@ -277,7 +328,49 @@ def _canonical_query_dimension(value: str) -> str:
         "date": "day",
         "name": "product",
         "id": "product_id",
+        "supplier_name": "supplier",
+        "ingredient_name": "ingredient",
     }.get(normalized, normalized)
+
+
+def _capability_payload(capability: Any) -> dict[str, Any]:
+    if isinstance(capability, dict):
+        return dict(capability.get("capabilities") or capability)
+    planning_hints = getattr(capability, "planning_hints", None)
+    if isinstance(planning_hints, dict):
+        return dict(planning_hints)
+    capabilities = getattr(capability, "capabilities", None)
+    if isinstance(capabilities, dict):
+        return dict(capabilities)
+    return {}
+
+
+def _queryspec_contract_payloads(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    contract = raw.get("queryspec_contract")
+    if isinstance(contract, dict):
+        payloads.append(contract)
+    payloads.append(raw)
+    return payloads
+
+
+def _dataset_rules_from_mapping(datasets: dict[Any, Any]) -> dict[str, QueryDatasetRule]:
+    rules: dict[str, QueryDatasetRule] = {}
+    for name, payload in datasets.items():
+        if not isinstance(payload, dict):
+            continue
+        measures = _string_set(payload.get("measures"))
+        dimensions = _string_set(payload.get("dimensions"))
+        if not measures or not dimensions:
+            continue
+        filters = _string_set(payload.get("filters")) or frozenset({"date_range"})
+        rules[str(name)] = QueryDatasetRule(
+            measures=measures,
+            dimensions=dimensions,
+            filters=filters,
+            max_limit=_int_or_default(payload.get("max_limit"), 100),
+        )
+    return rules
 
 
 def _parse_queryspec_payload(value: Any, *, strict: bool = True) -> dict[str, Any]:
@@ -311,6 +404,20 @@ def _validation_reason(exc: ValidationError) -> str:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _string_set(value: Any) -> frozenset[str]:
+    if isinstance(value, dict):
+        items = value.keys()
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        items = value
+    else:
+        return frozenset()
+    return frozenset(str(item) for item in items if str(item).strip())
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    return value if isinstance(value, int) else default
 
 
 def _dedupe(values) -> list[str]:

@@ -16,8 +16,9 @@ from app.agent.intent import coerce_intent, heuristic_intent, parse_question_int
 from app.agent.loop import AgentLoop
 from app.agent.plan import ToolPlan, ToolPlanStep, build_tool_plan
 from app.agent.profiles import profile_for_intent, rows_for_group
+from app.agent.queryspec import query_dataset_rules_from_capability
 from app.agent.strategy import heuristic_answer_strategy
-from app.agent.tool_reasoning import _planning_messages
+from app.agent.tool_reasoning import _available_tools, _planning_messages, _queryspec_contract_hint
 from app.config import Settings
 from app.dependencies.internal_auth import InternalRequestContext
 from app.llm.base import LLMError, LLMMessage, LLMResponse
@@ -604,6 +605,56 @@ def _queries_capability() -> ToolCapability:
     )
 
 
+def _procurement_queries_capability() -> ToolCapability:
+    contract = {
+        "datasets": {
+            "inventory_stock": {
+                "measures": ["current_stock", "minimum_stock", "stock_value"],
+                "dimensions": ["ingredient", "category", "unit", "status"],
+                "filters": ["date_range"],
+            },
+            "inventory_movements": {
+                "measures": ["quantity_in", "quantity_out", "net_quantity", "movement_count"],
+                "dimensions": ["ingredient", "movement_type", "day"],
+                "filters": ["date_range"],
+            },
+            "purchase_items": {
+                "measures": ["quantity_purchased", "total_cost", "avg_unit_cost", "purchase_count"],
+                "dimensions": ["supplier", "ingredient", "day"],
+                "filters": ["date_range"],
+            },
+        }
+    }
+    return _dynamic_capability(
+        tool_name="waro.queries.run",
+        entity="query_row",
+        grain="dynamic_dataset_row",
+        measures=(
+            "current_stock",
+            "minimum_stock",
+            "stock_value",
+            "quantity_purchased",
+            "total_cost",
+            "avg_unit_cost",
+            "purchase_count",
+        ),
+        dimensions=("ingredient", "supplier", "category", "day"),
+        operations=("filter", "aggregate", "group", "rank", "sort", "limit", "compare"),
+        default_fields=("rows", "meta"),
+        arguments_schema={
+            "properties": {
+                "spec": {"type": "string"},
+                "dry-run": {"type": "boolean"},
+            },
+            "required": ["spec"],
+        },
+        planning_hints={
+            "default_rank": ["current_stock", "minimum_stock", "total_cost"],
+            "queryspec_contract": contract,
+        },
+    )
+
+
 def _queries_schema_payload():
     return {
         "schema_version": "waro.agent.v2",
@@ -888,6 +939,33 @@ def test_plan_uses_queries_for_contextual_product_margin_follow_up():
     assert spec["dataset"] == "product_profitability"
     assert "profit_margin_pct" in spec["measures"]
     assert "cost_source" in spec["dimensions"]
+
+
+def test_plan_builds_inventory_query_from_discovered_contract():
+    intent = heuristic_intent("Que insumos estan en bajo stock?")
+    matches = match_tools(intent, [_procurement_queries_capability()], scopes=("analytics:read",))
+    plan = build_tool_plan(intent, matches)
+    spec = json.loads(plan.steps[0].arguments["spec"])
+
+    assert plan.valid is True
+    assert plan.steps[0].tool_name == "waro.queries.run"
+    assert spec["dataset"] == "inventory_stock"
+    assert "current_stock" in spec["measures"]
+    assert "ingredient" in spec["dimensions"]
+    assert "sql" not in json.dumps(spec).lower()
+
+
+def test_plan_builds_purchase_query_from_discovered_contract():
+    intent = heuristic_intent("Que proveedores subieron mas de precio en compras este mes?")
+    matches = match_tools(intent, [_procurement_queries_capability()], scopes=("analytics:read",))
+    plan = build_tool_plan(intent, matches)
+    spec = json.loads(plan.steps[0].arguments["spec"])
+
+    assert plan.valid is True
+    assert plan.steps[0].tool_name == "waro.queries.run"
+    assert spec["dataset"] == "purchase_items"
+    assert "supplier" in spec["dimensions"]
+    assert {"total_cost", "avg_unit_cost"}.intersection(spec["measures"])
 
 
 def test_plan_validator_accepts_customer_frequency_vs_spend_without_revenue():
@@ -1940,6 +2018,151 @@ def test_tool_reasoning_planner_uses_compact_tool_prompt():
     assert payload["available_tools"]["waro.queries.run"]["arguments"]["required"] == ["spec"]
 
 
+def test_tool_reasoning_queryspec_contract_uses_current_dataset_rules():
+    contract = _queryspec_contract_hint()
+    datasets = contract["datasets"]
+
+    assert "customers" in datasets
+    assert "customer_value" not in datasets
+    assert "last_order_date" in datasets["customers"]["measures"]
+    assert datasets["customers"]["example_spec"]["dataset"] == "customers"
+
+
+def test_tool_reasoning_queryspec_contract_can_use_discovered_rules():
+    contract = _queryspec_contract_hint(query_dataset_rules_from_capability(_procurement_queries_capability()))
+
+    assert "inventory_stock" in contract["datasets"]
+    assert "ingredient" in contract["datasets"]["inventory_stock"]["dimensions"]
+
+
+def test_tool_reasoning_customer_prompt_prefers_customer_tools_without_legacy_dataset():
+    tools = {
+        "waro.queries.run": {
+            "name": "waro.queries.run",
+            "description": "Ejecuta QuerySpec analitico",
+            "scope": "dataset_scope",
+            "domain": "analytics",
+            "default_fields": ["customer", "order_count", "total_spent", "avg_ticket"],
+            "allowed_fields": ["customer", "customer_id", "order_count", "total_spent", "avg_ticket"],
+            "arguments_schema": {
+                "type": "object",
+                "required": ["spec"],
+                "properties": {"spec": {"type": "string"}},
+            },
+            "capabilities": {"datasets": ["customers", "product_profitability"]},
+            "queryspec_contract": _queryspec_contract_hint(),
+        },
+        "waro.queries.schema": {
+            "name": "waro.queries.schema",
+            "description": "Lista datasets, medidas y dimensiones de QuerySpec",
+            "scope": "read",
+            "domain": "analytics",
+            "default_fields": ["datasets"],
+            "allowed_fields": ["datasets"],
+            "arguments_schema": {"type": "object", "properties": {}},
+            "capabilities": {"operation": "schema_discovery"},
+        },
+        "waro.customers.list": {
+            "name": "waro.customers.list",
+            "description": "Lista clientes por gasto, frecuencia o recencia",
+            "scope": "customers:read",
+            "domain": "customers",
+            "default_fields": ["customer_id", "name", "order_count", "total_spent"],
+            "allowed_fields": ["customer_id", "name", "order_count", "total_spent"],
+            "arguments_schema": {"type": "object", "properties": {}},
+            "capabilities": {"entity": "customer"},
+        },
+        "waro.customers.metrics": {
+            "name": "waro.customers.metrics",
+            "description": "Metricas de clientes y retencion",
+            "scope": "customers:read",
+            "domain": "customers",
+            "default_fields": ["summary", "top_customers"],
+            "allowed_fields": ["summary", "top_customers"],
+            "arguments_schema": {"type": "object", "properties": {}},
+            "capabilities": {"entity": "customer"},
+        },
+        "waro.financial.products": {
+            "name": "waro.financial.products",
+            "description": "Ranking financiero de productos",
+            "scope": "financial:read",
+            "domain": "financial",
+            "default_fields": ["products"],
+            "allowed_fields": ["products", "metrics"],
+            "arguments_schema": {"type": "object", "properties": {}},
+            "capabilities": {"entity": "product"},
+        },
+    }
+
+    messages = _planning_messages(
+        question="incluye tambien clientes frecuentes y genericos del mes",
+        tools=tools,
+        conversation_messages=[],
+        observations=[],
+    )
+    payload = json.loads(messages[1].content)
+
+    assert "waro.queries.run" in payload["available_tools"]
+    assert "waro.queries.schema" in payload["available_tools"]
+    assert "waro.customers.list" in payload["available_tools"]
+    assert "customer_value" not in messages[1].content
+    assert "waro.financial.products" not in payload["available_tools"]
+
+
+@pytest.mark.asyncio
+async def test_tool_reasoning_exposes_query_schema_with_dataset_scope(monkeypatch):
+    async def fake_load(self):
+        return {
+            "schema_version": "waro.agent.v2",
+            "tools": [
+                {
+                    "name": "waro.queries.schema",
+                    "command": ["queries", "schema"],
+                    "scope": "read",
+                    "domain": "analytics",
+                    "description": "List QuerySpec datasets",
+                    "arguments": {"type": "object", "properties": {}},
+                    "response": {
+                        "shape": "object",
+                        "default_fields": ["datasets"],
+                        "fields": ["datasets"],
+                        "top_level_keys": ["datasets"],
+                    },
+                    "capabilities": {"operation": "schema_discovery"},
+                },
+                {
+                    "name": "waro.queries.run",
+                    "command": ["queries", "run"],
+                    "scope": "dataset_scope",
+                    "domain": "analytics",
+                    "description": "Run QuerySpec",
+                    "arguments": {
+                        "type": "object",
+                        "required": ["spec"],
+                        "properties": {"spec": {"type": "string"}},
+                    },
+                    "response": {
+                        "shape": "rows",
+                        "row_path": "rows",
+                        "default_fields": ["customer", "order_count"],
+                        "fields": ["customer", "order_count"],
+                        "top_level_keys": ["rows", "data", "meta"],
+                    },
+                    "capabilities": {"datasets": ["customers"]},
+                },
+            ],
+        }
+
+    settings = Settings(TOOL_CATALOG_SOURCE="cli")
+    registry = ToolRegistry(settings)
+    monkeypatch.setattr(ToolRegistry, "_load_cli_schema", fake_load)
+
+    tools = await _available_tools(registry=registry, scopes=("dataset_scope", "customers:read"))
+
+    assert "waro.queries.schema" in tools
+    assert "waro.queries.run" in tools
+
+
 @pytest.mark.asyncio
 async def test_kali_runner_does_not_fall_back_to_legacy_when_tool_reasoning_fails():
     from app.agent.runner import KaliAgentRunner
@@ -2040,6 +2263,70 @@ async def test_agent_loop_blocks_invalid_queryspec_before_gateway(monkeypatch):
     assert observations[0]["error"]["rejected_reason"] == "invalid_dataset:raw_sql"
     assert span.attributes["waro.queries.valid"] is False
     assert span.attributes["waro.queries.rejected_reason"] == "invalid_dataset:raw_sql"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_traces_discovered_queryspec_dataset(monkeypatch):
+    async def fake_load(self):
+        payload = _queries_schema_payload()
+        payload["tools"][0]["capabilities"]["queryspec_contract"] = _procurement_queries_capability().planning_hints[
+            "queryspec_contract"
+        ]
+        payload["tools"][0]["capabilities"]["measures"] = list(_procurement_queries_capability().measures)
+        payload["tools"][0]["capabilities"]["dimensions"] = list(_procurement_queries_capability().dimensions)
+        return payload
+
+    settings = Settings(TOOL_CATALOG_SOURCE="cli", LLM_PROVIDER="disabled")
+    registry = ToolRegistry(settings)
+    monkeypatch.setattr(ToolRegistry, "_load_cli_schema", fake_load)
+    await registry.refresh(force=True)
+    gateway = RecordingGateway()
+    loop = AgentLoop(
+        settings=settings,
+        gateway=gateway,
+        registry=registry,
+        llm_adapter=FakeLLM(),
+    )
+    context = InternalRequestContext(
+        tenant_id=str(uuid4()),
+        profile_id=str(uuid4()),
+        request_id="req-inventory-query",
+        member_id=None,
+        scopes=("analytics:read",),
+    )
+    span = RecordingSpan()
+    observations = await loop._execute_plan(
+        plan_steps=(
+            ToolPlanStep(
+                tool_name="waro.queries.run",
+                arguments={
+                    "spec": json.dumps(
+                        {
+                            "dataset": "inventory_stock",
+                            "measures": ["current_stock", "minimum_stock"],
+                            "dimensions": ["ingredient"],
+                            "order_by": [{"field": "current_stock", "direction": "desc"}],
+                            "limit": 10,
+                        }
+                    )
+                },
+                fields=("rows", "meta"),
+                purpose="test inventory query",
+                expected_evidence=("current_stock",),
+            ),
+        ),
+        context=context,
+        run_id=uuid4(),
+        span=span,
+    )
+
+    assert len(gateway.calls) == 1
+    assert observations[0]["status"] == "succeeded"
+    assert span.attributes["waro.tool.selected"] == "waro.queries.run"
+    assert span.attributes["waro.tool.domain"] == "queries"
+    assert span.attributes["waro.queries.dataset"] == "inventory_stock"
+    assert span.attributes["waro.queries.schema_source"] == "schema"
+    assert span.attributes["waro.queries.valid"] is True
 
 
 @pytest.mark.asyncio

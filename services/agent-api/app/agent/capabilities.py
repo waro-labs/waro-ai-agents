@@ -231,7 +231,18 @@ def _entity_compatible(intent: QuestionIntent, capability: ToolCapability) -> bo
     if intent.entity == "unknown":
         return True
     if query_tool_requested(capability):
-        return intent.entity in {"sale", "order", "product", "customer", "business"}
+        return intent.entity in {
+            "sale",
+            "order",
+            "product",
+            "customer",
+            "business",
+            "ingredient",
+            "inventory",
+            "purchase",
+            "supplier",
+            "procurement",
+        }
     if intent.entity == "business":
         return capability.entity in {
             "sale",
@@ -239,12 +250,21 @@ def _entity_compatible(intent: QuestionIntent, capability: ToolCapability) -> bo
             "product",
             "customer",
             "loyalty_transaction",
+            "ingredient",
+            "inventory",
+            "purchase",
+            "supplier",
+            "procurement",
         }
     if intent.entity == capability.entity:
         return True
     if intent.entity == "sale" and capability.entity in {"sale", "order"}:
         return True
     if intent.entity == "product" and capability.entity in {"product", "menu_item"}:
+        return True
+    if intent.entity == "inventory" and capability.entity in {"ingredient", "inventory"}:
+        return True
+    if intent.entity == "procurement" and capability.entity in {"purchase", "supplier", "procurement"}:
         return True
     return False
 
@@ -253,7 +273,16 @@ def _grain_compatible(intent: QuestionIntent, capability: ToolCapability) -> boo
     if intent.grain == "unknown":
         return True
     if query_tool_requested(capability):
-        return intent.grain in {"period", "product_period", "customer_period", "business_period"}
+        return intent.grain in {
+            "period",
+            "product_period",
+            "customer_period",
+            "business_period",
+            "inventory_snapshot",
+            "inventory_movement",
+            "purchase_period",
+            "supplier_period",
+        }
     if intent.grain == "business_period":
         return capability.supports_period or capability.grain in {
             "period",
@@ -263,6 +292,10 @@ def _grain_compatible(intent: QuestionIntent, capability: ToolCapability) -> boo
             "customer_period_summary",
             "cohort_period",
             "period_or_customer",
+            "inventory_snapshot",
+            "inventory_movement",
+            "purchase_period",
+            "supplier_period",
         }
     if intent.grain == capability.grain:
         return True
@@ -271,6 +304,14 @@ def _grain_compatible(intent: QuestionIntent, capability: ToolCapability) -> boo
     if intent.grain == "product_period" and capability.grain in {"product_period", "period_or_group"}:
         return True
     if intent.grain == "customer_period" and capability.grain in {"customer_period", "customer_period_summary"}:
+        return True
+    if intent.grain == "inventory_snapshot" and capability.grain in {"inventory_snapshot", "ingredient", "period_or_group"}:
+        return True
+    if intent.grain == "inventory_movement" and capability.grain in {"inventory_movement", "period_or_group"}:
+        return True
+    if intent.grain == "purchase_period" and capability.grain in {"purchase_period", "period_or_group"}:
+        return True
+    if intent.grain == "supplier_period" and capability.grain in {"supplier_period", "period_or_group"}:
         return True
     return False
 
@@ -320,6 +361,14 @@ def _query_measure_aliases(measure: str) -> set[str]:
         "total_orders": {"total_orders", "order_count", "orders_count"},
         "quantity": {"quantity", "quantity_sold"},
         "total_units_sold": {"total_units_sold", "quantity_sold"},
+        "current_stock": {"current_stock", "quantity", "stock"},
+        "minimum_stock": {"minimum_stock", "low_stock"},
+        "quantity_purchased": {"quantity_purchased", "quantity"},
+        "purchase_count": {"purchase_count", "count"},
+        "avg_unit_cost": {"avg_unit_cost", "unit_cost", "cost"},
+        "total_cost": {"total_cost", "cost"},
+        "movement_count": {"movement_count", "count"},
+        "net_quantity": {"net_quantity", "quantity"},
     }
     return aliases.get(normalized, {normalized})
 
