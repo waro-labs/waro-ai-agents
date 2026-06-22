@@ -6,6 +6,7 @@ import pytest
 
 from app.agent.classifier import classify_complexity, heuristic_complexity
 from app.agent.capabilities import ToolCapability, capability_from_spec, match_tools
+from app.agent.conversation import _state_from_artifact
 from app.agent.evidence import build_evidence_artifact, deterministic_evidence_summary
 from app.agent.intent import coerce_intent, heuristic_intent, parse_question_intent, resolve_contextual_intent
 from app.agent.loop import AgentLoop
@@ -787,6 +788,186 @@ def test_product_follow_up_margin_uses_previous_ranked_rows_when_current_rows_mi
     summary = deterministic_evidence_summary(artifact)
     assert "Burger" in summary
     assert "margen 12%" in summary
+
+
+def test_query_evidence_preserves_metadata_and_limitations():
+    intent = heuristic_intent("dime los productos mas vendidos del año y su margen")
+    plan = build_tool_plan(
+        intent,
+        match_tools(intent, [_queries_capability()], scopes=("analytics:read",)),
+    )
+    spec = json.loads(plan.steps[0].arguments["spec"])
+    artifact = build_evidence_artifact(
+        question="dime los productos mas vendidos del año y su margen",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.queries.run",
+                "status": "succeeded",
+                "arguments": {"spec": json.dumps(spec)},
+                "expected_evidence": ["entity:product", "quantity_sold", "profit_margin_pct"],
+                "result": {
+                    "rows": [{"product": "Burger", "quantity_sold": 50, "revenue": 1000000, "profit_margin_pct": 12}],
+                    "meta": {
+                        "dataset": "product_profitability",
+                        "row_count": 1,
+                        "limitations": ["Solo productos con ventas cerradas."],
+                    },
+                },
+            }
+        ],
+    )
+
+    metadata = artifact["query_metadata"][0]
+    assert metadata["dataset"] == "product_profitability"
+    assert "quantity_sold" in metadata["measures"]
+    assert "product" in metadata["dimensions"]
+    assert metadata["row_count"] == 1
+    assert artifact["tables"][0]["rows"][0]["name"] == "Burger"
+    assert artifact["tables"][0]["rows"][0]["margin"] == 12
+    assert "Solo productos con ventas cerradas." in artifact["limitations"]
+
+
+def test_product_query_analysis_creates_non_ranking_follow_up():
+    intent = heuristic_intent("dime qué productos venden mucho pero tienen bajo margen")
+    plan = build_tool_plan(
+        intent,
+        match_tools(intent, [_queries_capability()], scopes=("analytics:read",)),
+    )
+    spec = json.loads(plan.steps[0].arguments["spec"])
+    artifact = build_evidence_artifact(
+        question="dime qué productos venden mucho pero tienen bajo margen",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.queries.run",
+                "status": "succeeded",
+                "arguments": {"spec": json.dumps(spec)},
+                "result": {
+                    "rows": [
+                        {
+                            "product": "Burger",
+                            "quantity_sold": 50,
+                            "revenue": 1000000,
+                            "profit_margin_pct": 12,
+                            "total_profit": 120000,
+                        },
+                        {
+                            "product": "Pizza",
+                            "quantity_sold": 30,
+                            "revenue": 900000,
+                            "profit_margin_pct": 35,
+                            "total_profit": 315000,
+                        },
+                    ],
+                    "meta": {"dataset": "product_profitability", "row_count": 2},
+                },
+            }
+        ],
+    )
+    artifact["answer_strategy"] = {"type": "follow_up", "avoid_repeating": True}
+    summary = deterministic_evidence_summary(artifact)
+
+    assert "QuerySpec product_profitability devolvio 2 filas" in artifact["analysis"]["facts"][0]
+    assert any("Burger combina volumen alto con margen de 12%" in item for item in artifact["analysis"]["patterns"])
+    assert "Burger tiene el margen mas bajo" in artifact["analysis"]["risks"][0]
+    assert "Otro angulo sobre esos productos" in summary
+    assert "1. Burger" not in summary
+
+
+def test_customer_query_comparison_summary_uses_frequency_and_spend():
+    intent = heuristic_intent("Compara clientes frecuentes contra clientes con mayor valor comprado este mes.")
+    plan = build_tool_plan(
+        intent,
+        match_tools(intent, [_queries_capability()], scopes=("analytics:read",)),
+    )
+    spec = json.loads(plan.steps[0].arguments["spec"])
+    artifact = build_evidence_artifact(
+        question="Compara clientes frecuentes contra clientes con mayor valor comprado este mes.",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.queries.run",
+                "status": "succeeded",
+                "arguments": {"spec": json.dumps(spec)},
+                "result": {
+                    "rows": [
+                        {"customer": "Ana", "order_count": 8, "total_spent": 400000, "avg_ticket": 50000},
+                        {"customer": "Luis", "order_count": 2, "total_spent": 900000, "avg_ticket": 450000},
+                    ],
+                    "meta": {"dataset": "customers", "row_count": 2},
+                },
+            }
+        ],
+    )
+    artifact["answer_strategy"] = {"type": "comparison"}
+    summary = deterministic_evidence_summary(artifact)
+
+    assert "Ana lidera frecuencia con 8 ordenes." in artifact["analysis"]["facts"]
+    assert "Luis lidera valor comprado con $900.000." in artifact["analysis"]["facts"]
+    assert "Comparacion de clientes" in summary
+    assert "Ana (8 ordenes, $400.000 comprado, ticket $50.000)" in summary
+    assert "Luis (2 ordenes, $900.000 comprado, ticket $450.000)" in summary
+
+
+def test_query_recommendation_uses_actions_and_limitations():
+    intent = heuristic_intent("dime qué productos venden mucho pero tienen bajo margen")
+    plan = build_tool_plan(
+        intent,
+        match_tools(intent, [_queries_capability()], scopes=("analytics:read",)),
+    )
+    spec = json.loads(plan.steps[0].arguments["spec"])
+    artifact = build_evidence_artifact(
+        question="que acciones tomarías con esos hallazgos",
+        intent=intent,
+        plan=plan,
+        observations=[
+            {
+                "tool_name": "waro.queries.run",
+                "status": "succeeded",
+                "arguments": {"spec": json.dumps(spec)},
+                "result": {
+                    "rows": [{"product": "Burger", "quantity_sold": 50, "profit_margin_pct": 12}],
+                    "meta": {
+                        "dataset": "product_profitability",
+                        "row_count": 1,
+                        "limitations": ["No incluye costos de mano de obra."],
+                    },
+                },
+            }
+        ],
+    )
+    artifact["answer_strategy"] = {"type": "recommendation", "use_previous_artifact": True}
+    summary = deterministic_evidence_summary(artifact)
+
+    assert "Que haria:" in summary
+    assert "Priorizar auditoria de margen para Burger" in summary
+    assert "No incluye costos de mano de obra." in summary
+
+
+def test_conversation_compact_artifact_keeps_query_context():
+    state = _state_from_artifact(
+        artifact={
+            "agent_mode": True,
+            "question": "dime los productos mas vendidos y su margen",
+            "question_intent": {"entity": "product", "grain": "product_period", "measures": ["quantity_sold"]},
+            "query_metadata": [{"dataset": "product_profitability", "measures": ["quantity_sold"], "row_count": 2}],
+            "ranked_rows": [{"name": "Burger"}, {"name": "Pizza"}],
+            "analysis": {"facts": ["QuerySpec product_profitability devolvio 2 filas."]},
+            "limitations": ["Solo productos con ventas cerradas."],
+            "answer_strategy": {"type": "ranking"},
+            "summary": "Productos...",
+        },
+        last_question=None,
+        last_summary=None,
+    )
+
+    assert state.last_artifact is not None
+    assert state.last_artifact["query_metadata"][0]["dataset"] == "product_profitability"
+    assert "Solo productos con ventas cerradas." in state.last_artifact["limitations"]
 
 
 def test_evidence_summarizes_waros_customer_rows():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.agent.intent import QuestionIntent
@@ -24,6 +25,7 @@ def build_evidence_artifact(
     ranked_rows = _ranked_rows(intent, tables)
     analysis = _analysis_from_evidence(intent, tables, metrics, ranked_rows)
     failed = [obs for obs in observations if obs.get("status") != "succeeded"]
+    query_metadata = _query_metadata_from_tables(tables)
     if not plan.valid:
         answerability = "blocked"
         blocked_reason = plan.blocked_reason or "invalid_plan"
@@ -60,6 +62,7 @@ def build_evidence_artifact(
         "observations": observations,
         "tables": tables,
         "metrics": metrics,
+        "query_metadata": query_metadata,
         "ranked_rows": ranked_rows,
         "analysis": analysis,
         "insights": [
@@ -71,7 +74,7 @@ def build_evidence_artifact(
         "recommended_actions": _string_items(analysis.get("recommended_actions")),
         "open_questions": _open_questions(intent, analysis),
         "evidence": _evidence(tables),
-        "limitations": _limitations(plan, failed),
+        "limitations": _limitations(plan, failed, tables),
         "answerability": answerability,
         "blocked_reason": blocked_reason,
         "safe_to_answer": safe_to_answer,
@@ -104,6 +107,8 @@ def deterministic_evidence_summary(artifact: dict[str, Any]) -> str:
 
     if strategy == "recommendation":
         return _recommendation_summary(artifact, period)
+    if strategy == "follow_up" and entity == "product" and rows:
+        return _product_follow_up_summary(artifact, rows, period)
     if strategy == "diagnosis" and entity == "business":
         if bool(strategy_payload.get("avoid_repeating")):
             return _business_follow_up_summary(artifact, period)
@@ -268,6 +273,97 @@ def _previous_ranked_rows(artifact: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _query_metadata_from_tables(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        metadata
+        for table in tables
+        if isinstance((metadata := table.get("query_metadata")), dict) and metadata
+    ]
+
+
+def _query_metadata_from_observation(observation: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    arguments = observation.get("arguments") if isinstance(observation.get("arguments"), dict) else {}
+    spec = _parse_spec(arguments.get("spec"))
+    meta = _metadata_from_result(result)
+    if not spec and not meta:
+        return {}
+    metadata: dict[str, Any] = {
+        "dataset": spec.get("dataset") or meta.get("dataset"),
+        "measures": _string_items(spec.get("measures") if "measures" in spec else meta.get("measures")),
+        "dimensions": _string_items(spec.get("dimensions") if "dimensions" in spec else meta.get("dimensions")),
+        "filters": spec.get("filters") or meta.get("filters") or {},
+        "order_by": spec.get("order_by") or meta.get("order_by") or meta.get("sort") or [],
+        "limit": spec.get("limit") or meta.get("limit"),
+        "row_count": meta.get("row_count") or meta.get("rowCount") or _safe_len(result.get("rows")),
+        "limitations": _string_items(
+            meta.get("limitations")
+            or meta.get("warnings")
+            or result.get("limitations")
+            or result.get("warnings")
+        ),
+    }
+    return {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+
+
+def _metadata_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    for key in ("meta", "metadata"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            return value
+    data = result.get("data")
+    if isinstance(data, dict):
+        for key in ("meta", "metadata"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def _parse_spec(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _query_limitations(metadata: dict[str, Any]) -> list[str]:
+    limitations = _string_items(metadata.get("limitations"))
+    if metadata.get("dataset") and not metadata.get("measures"):
+        limitations.append("La evidencia de QuerySpec no declaro measures concretas.")
+    if metadata.get("dataset") and not metadata.get("dimensions"):
+        limitations.append("La evidencia de QuerySpec no declaro dimensions concretas.")
+    return _dedupe_text_items(limitations)
+
+
+def _normalize_query_row(row: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    aliases = {
+        "product": "name",
+        "product_name": "name",
+        "product_id": "id",
+        "customer": "name",
+        "customer_name": "name",
+        "customer_id": "id",
+        "quantity_sold": "quantity",
+        "total_units_sold": "quantity",
+        "total_revenue": "revenue",
+        "profit_margin_pct": "margin",
+        "profit_margin_real_pct": "margin",
+        "margin_pct": "margin",
+    }
+    for source, target in aliases.items():
+        if source in row and target not in normalized:
+            normalized[target] = row[source]
+    if metadata.get("dataset") and "_query_dataset" not in normalized:
+        normalized["_query_dataset"] = metadata.get("dataset")
+    return normalized
+
+
 def _open_questions(intent: QuestionIntent, analysis: dict[str, Any]) -> list[str]:
     questions: list[str] = []
     limitations = _string_items(analysis.get("limitations"))
@@ -280,6 +376,8 @@ def _open_questions(intent: QuestionIntent, analysis: dict[str, Any]) -> list[st
 
 def _table_from_observation(observation: dict[str, Any]) -> dict[str, Any]:
     result = observation.get("result") if isinstance(observation.get("result"), dict) else {}
+    query_metadata = _query_metadata_from_observation(observation, result)
+    rows = [_normalize_query_row(row, query_metadata) for row in _rows_from_result(result)]
     return {
         "tool": observation.get("tool_name"),
         "status": observation.get("status"),
@@ -288,8 +386,10 @@ def _table_from_observation(observation: dict[str, Any]) -> dict[str, Any]:
             for item in observation.get("expected_evidence") or []
             if item is not None
         ],
-        "rows": _rows_from_result(result),
+        "rows": rows,
         "metrics": _metrics_from_result(result),
+        "query_metadata": query_metadata,
+        "limitations": _query_limitations(query_metadata),
         "summary": observation.get("result_summary"),
     }
 
@@ -416,6 +516,11 @@ def _merge_product_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ("margin_pct", "margin"),
             ("profit_margin_pct", "margin"),
             ("profit_margin_real_pct", "margin"),
+            ("profit_margin_operativo_pct", "margin_operativo"),
+            ("total_profit", "total_profit"),
+            ("profit_per_unit", "profit_per_unit"),
+            ("category", "category"),
+            ("classification", "classification"),
             ("cost", "cost"),
             ("estimated_cost", "cost"),
         ):
@@ -427,7 +532,13 @@ def _merge_product_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _evidence(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
-        {"tool": table.get("tool"), "row_count": len(table.get("rows") or []), "metrics": table.get("metrics") or {}}
+        {
+            "tool": table.get("tool"),
+            "row_count": len(table.get("rows") or []),
+            "metrics": table.get("metrics") or {},
+            "query_metadata": table.get("query_metadata") or {},
+            "limitations": table.get("limitations") or [],
+        }
         for table in tables
     ]
 
@@ -479,6 +590,18 @@ def _analysis_from_evidence(
             if group and message and not grouped_rows.get(group):
                 limitations.append(message)
 
+    _apply_query_analysis(
+        intent=intent,
+        tables=tables,
+        ranked_rows=ranked_rows,
+        facts=facts,
+        patterns=patterns,
+        risks=risks,
+        opportunities=opportunities,
+        recommended_actions=recommended_actions,
+        limitations=limitations,
+    )
+
     return {
         "facts": facts,
         "patterns": patterns,
@@ -489,6 +612,124 @@ def _analysis_from_evidence(
         "confidence": "medium" if patterns or facts else "low",
         "source_tools": [str(table.get("tool")) for table in tables if table.get("tool")],
     }
+
+
+def _apply_query_analysis(
+    *,
+    intent: QuestionIntent,
+    tables: list[dict[str, Any]],
+    ranked_rows: list[dict[str, Any]],
+    facts: list[str],
+    patterns: list[str],
+    risks: list[str],
+    opportunities: list[str],
+    recommended_actions: list[str],
+    limitations: list[str],
+) -> None:
+    query_tables = [
+        table
+        for table in tables
+        if isinstance(table.get("query_metadata"), dict) and table.get("query_metadata")
+    ]
+    if not query_tables:
+        return
+    for table in query_tables:
+        metadata = table.get("query_metadata") if isinstance(table.get("query_metadata"), dict) else {}
+        dataset = str(metadata.get("dataset") or "query")
+        row_count = metadata.get("row_count") or len(table.get("rows") or [])
+        measures = ", ".join(_string_items(metadata.get("measures")))
+        dimensions = ", ".join(_string_items(metadata.get("dimensions")))
+        facts.append(
+            f"QuerySpec {dataset} devolvio {row_count} filas"
+            + (f" con measures {measures}" if measures else "")
+            + (f" por dimensions {dimensions}" if dimensions else "")
+            + "."
+        )
+        limitations.extend(_query_limitations(metadata))
+    if intent.entity == "product":
+        _apply_product_query_analysis(
+            rows=ranked_rows,
+            facts=facts,
+            patterns=patterns,
+            risks=risks,
+            opportunities=opportunities,
+            recommended_actions=recommended_actions,
+            limitations=limitations,
+        )
+    elif intent.entity == "customer":
+        _apply_customer_query_analysis(
+            rows=ranked_rows,
+            facts=facts,
+            patterns=patterns,
+            opportunities=opportunities,
+            recommended_actions=recommended_actions,
+        )
+
+
+def _apply_product_query_analysis(
+    *,
+    rows: list[dict[str, Any]],
+    facts: list[str],
+    patterns: list[str],
+    risks: list[str],
+    opportunities: list[str],
+    recommended_actions: list[str],
+    limitations: list[str],
+) -> None:
+    if not rows:
+        limitations.append("No hubo filas de productos para analizar.")
+        return
+    top = rows[0]
+    top_name = _row_name(top, fallback="Producto")
+    top_bits = _product_bits(top, include_margin=True, include_profit=True)
+    facts.append(f"{top_name} lidera la evidencia" + (f" ({', '.join(top_bits)})" if top_bits else "") + ".")
+    with_margin = [row for row in rows if _has_value(row, "margin")]
+    if with_margin:
+        lower_margin = sorted(with_margin, key=lambda row: _number(row.get("margin")))[0]
+        low_name = _row_name(lower_margin, fallback="Producto")
+        risks.append(
+            f"{low_name} tiene el margen mas bajo entre las filas consultadas ({lower_margin.get('margin')}%)."
+        )
+    volume_rows = [row for row in rows if _number(row.get("quantity")) > 0]
+    if volume_rows and with_margin:
+        mixed = sorted(
+            volume_rows,
+            key=lambda row: (-_number(row.get("quantity")), _number(row.get("margin") or 999999)),
+        )[0]
+        mixed_name = _row_name(mixed, fallback="Producto")
+        if _has_value(mixed, "margin"):
+            patterns.append(
+                f"{mixed_name} combina volumen alto con margen de {mixed.get('margin')}% en la evidencia consultada."
+            )
+            opportunities.append(f"Revisar precio, costo o receta de {mixed_name} antes de empujar mas volumen.")
+            recommended_actions.append(f"Priorizar auditoria de margen para {mixed_name} usando costo, precio y ventas recientes.")
+    if not with_margin:
+        limitations.append("La evidencia de productos no incluyo margen; no se puede evaluar rentabilidad.")
+
+
+def _apply_customer_query_analysis(
+    *,
+    rows: list[dict[str, Any]],
+    facts: list[str],
+    patterns: list[str],
+    opportunities: list[str],
+    recommended_actions: list[str],
+) -> None:
+    if not rows:
+        return
+    with_orders = [row for row in rows if _number(row.get("order_count")) > 0]
+    with_spend = [row for row in rows if _number(row.get("total_spent")) > 0]
+    if with_orders:
+        frequent = sorted(with_orders, key=lambda row: -_number(row.get("order_count")))[0]
+        facts.append(f"{_row_name(frequent, fallback='Cliente')} lidera frecuencia con {frequent.get('order_count')} ordenes.")
+    if with_spend:
+        valuable = sorted(with_spend, key=lambda row: -_number(row.get("total_spent")))[0]
+        spent = _fmt_money(valuable.get("total_spent"))
+        facts.append(f"{_row_name(valuable, fallback='Cliente')} lidera valor comprado" + (f" con {spent}" if spent else "") + ".")
+    if with_orders and with_spend:
+        patterns.append("La comparacion separa frecuencia, valor comprado y ticket promedio cuando esas cifras vienen en la evidencia.")
+        opportunities.append("Tratar clientes frecuentes y clientes de mayor valor como segmentos distintos.")
+        recommended_actions.append("Crear acciones separadas: retencion para frecuentes y upsell para clientes de mayor valor.")
 
 
 def _business_analysis_summary(artifact: dict[str, Any], period: str | None) -> str:
@@ -537,6 +778,13 @@ def _recommendation_summary(artifact: dict[str, Any], period: str | None) -> str
     risks = _string_items(analysis.get("risks"))[:3]
     opportunities = _string_items(analysis.get("opportunities"))[:3]
     actions = _string_items(analysis.get("recommended_actions"))[:5]
+    limitations = _dedupe_text_items(
+        [
+            *_string_items(analysis.get("limitations")),
+            *_string_items(artifact.get("limitations")),
+            *_string_items(context.get("prior_limitations")),
+        ]
+    )[:3]
     if not actions:
         actions = _string_items(context.get("prior_actions"))[:5]
     actions = _dedupe_text_items(actions)
@@ -562,6 +810,10 @@ def _recommendation_summary(artifact: dict[str, Any], period: str | None) -> str
         lines.append("")
         lines.append("Que haria:")
         lines.extend(f"- {item}" for item in actions)
+    if limitations:
+        lines.append("")
+        lines.append("Limitaciones:")
+        lines.extend(f"- {item}" for item in limitations)
     if len(lines) == 1:
         lines.append("No encontre acciones suficientemente respaldadas por la evidencia disponible.")
     return "\n".join(lines)
@@ -602,6 +854,47 @@ def _business_follow_up_summary(artifact: dict[str, Any], period: str | None) ->
         lines.append("- Para avanzar, compara este periodo contra uno anterior equivalente y separa ventas genericas de clientes identificados.")
     if len(lines) == 1:
         lines.append("No encontre un angulo nuevo suficientemente respaldado por la evidencia actual.")
+    return "\n".join(lines)
+
+
+def _product_follow_up_summary(artifact: dict[str, Any], rows: list[dict[str, Any]], period: str | None) -> str:
+    analysis = artifact.get("analysis") if isinstance(artifact.get("analysis"), dict) else {}
+    context = artifact.get("conversation_state") if isinstance(artifact.get("conversation_state"), dict) else {}
+    previous = context.get("last_artifact") if isinstance(context.get("last_artifact"), dict) else {}
+    previous_summary = str(context.get("last_summary") or previous.get("summary") or "")
+    patterns = _exclude_seen(_dedupe_text_items(_string_items(analysis.get("patterns"))), previous_summary)
+    risks = _exclude_seen(_dedupe_text_items(_string_items(analysis.get("risks"))), previous_summary)
+    opportunities = _exclude_seen(_dedupe_text_items(_string_items(analysis.get("opportunities"))), previous_summary)
+    actions = _exclude_seen(_dedupe_text_items(_string_items(analysis.get("recommended_actions"))), previous_summary)
+    limitations = _dedupe_text_items(
+        [
+            *_string_items(analysis.get("limitations")),
+            *_string_items(artifact.get("limitations")),
+            *_string_items(context.get("prior_limitations")),
+        ]
+    )
+    lines = [f"Otro angulo sobre esos productos para {_period_label(period)}:"]
+    for label, items, limit in (
+        ("Lecturas adicionales", patterns, 3),
+        ("Riesgos a revisar", risks, 3),
+        ("Oportunidades", opportunities, 3),
+        ("Siguiente accion", actions, 3),
+    ):
+        if items:
+            lines.append("")
+            lines.append(f"{label}:")
+            lines.extend(f"- {item}" for item in items[:limit])
+    if len(lines) == 1:
+        sample = rows[:3]
+        lines.append("")
+        lines.append("Base disponible:")
+        for row in sample:
+            bits = _product_bits(row, include_margin=True, include_profit=True)
+            lines.append(f"- {_row_name(row, fallback='Producto')}" + (f": {', '.join(bits)}." if bits else "."))
+    if limitations:
+        lines.append("")
+        lines.append("Limitaciones:")
+        lines.extend(f"- {item}" for item in limitations[:3])
     return "\n".join(lines)
 
 
@@ -755,18 +1048,22 @@ def _list(value: Any) -> list[Any]:
 
 
 def _string_items(value: Any) -> list[str]:
-    if not isinstance(value, list):
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, (list, tuple)):
         return []
     return [str(item) for item in value if item]
 
 
-def _limitations(plan: ToolPlan, failed: list[dict[str, Any]]) -> list[str]:
+def _limitations(plan: ToolPlan, failed: list[dict[str, Any]], tables: list[dict[str, Any]]) -> list[str]:
     limitations = []
     if plan.missing_coverage:
         limitations.append("Falta cobertura: " + ", ".join(plan.missing_coverage))
     if failed:
         limitations.append("Fallaron tools: " + ", ".join(str(item.get("tool_name")) for item in failed))
-    return limitations
+    for table in tables:
+        limitations.extend(_string_items(table.get("limitations")))
+    return _dedupe_text_items(limitations)
 
 
 def _blocked_message(reason: str | None, plan: ToolPlan) -> str:
@@ -793,6 +1090,48 @@ def _number(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _safe_len(value: Any) -> int | None:
+    return len(value) if isinstance(value, list) else None
+
+
+def _has_value(row: dict[str, Any], key: str) -> bool:
+    return row.get(key) is not None and str(row.get(key)).strip() != ""
+
+
+def _row_name(row: dict[str, Any], *, fallback: str) -> str:
+    return str(
+        row.get("name")
+        or row.get("product")
+        or row.get("product_name")
+        or row.get("customer")
+        or row.get("customer_name")
+        or row.get("id")
+        or row.get("product_id")
+        or row.get("customer_id")
+        or fallback
+    )
+
+
+def _product_bits(row: dict[str, Any], *, include_margin: bool, include_profit: bool) -> list[str]:
+    bits: list[str] = []
+    quantity = row.get("quantity") or row.get("quantity_sold") or row.get("total_units_sold")
+    revenue = _fmt_money(row.get("revenue") or row.get("total_revenue"))
+    margin = row.get("margin") or row.get("profit_margin_pct") or row.get("margin_pct")
+    total_profit = _fmt_money(row.get("total_profit"))
+    category = row.get("category")
+    if quantity is not None:
+        bits.append(f"{quantity} unidades")
+    if revenue:
+        bits.append(f"{revenue} vendido")
+    if include_margin and margin is not None:
+        bits.append(f"margen {margin}%")
+    if include_profit and total_profit:
+        bits.append(f"utilidad {total_profit}")
+    if category:
+        bits.append(f"categoria {category}")
+    return bits
 
 
 def _period_prefix(label: str | None) -> str:
