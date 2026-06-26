@@ -40,6 +40,7 @@ class AgentGraphState(TypedDict, total=False):
 class AgentWorkflow:
     graph_name = "agent_router_langgraph_v1"
 
+    # INITIALIZE THE AGENT WORKFLOW, CONSTRUCT THE GRAPH AND ADD THE NODES
     def __init__(
         self,
         *,
@@ -68,14 +69,14 @@ class AgentWorkflow:
     async def run(
         self,
         *,
-        request: AgentQuestionRequest,
-        context: InternalRequestContext,
-    ) -> AgentWorkflowResponse:
+        request: AgentQuestionRequest, # REQUEST CONTAINS THE QUESTION TO ASK THE AGENT
+        context: InternalRequestContext, # CONTEXT CONTAINS THE TENANT ID, MEMBER ID, SCOPES, AND REQUEST ID
+    ) -> AgentWorkflowResponse: #TRACING THE AGENT WORKFLOW
         with self.tracer.start_as_current_span("agent.workflow") as span:
             span.set_attribute("waro.workflow.name", self.graph_name)
             span.set_attribute("waro.tenant_id", context.tenant_id)
             span.set_attribute("waro.request_id", context.request_id)
-            try:
+            try: # INVOKE THE AGENT WORKFLOW
                 state = await self.graph.ainvoke({"request": request, "context": context})
             except Exception as exc:
                 span.record_exception(exc)
@@ -100,6 +101,7 @@ class AgentWorkflow:
                 conversation_id=request.conversation_id,
                 date_from=request.date_from,
                 date_to=request.date_to,
+                timezone=request.timezone,
                 group_by=request.group_by,
             ),
             context=context,
@@ -128,18 +130,18 @@ class AgentWorkflow:
                 error_message=truncate_text(str(exc), 240),
             )
 
-    def _build_graph(self):
-        graph = StateGraph(AgentGraphState)
-        graph.add_node("route_agent", self._route_agent_node)
-        graph.add_node("dispatch_workflow", self._dispatch_workflow_node)
-        graph.add_edge(START, "route_agent")
-        graph.add_edge("route_agent", "dispatch_workflow")
-        graph.add_edge("dispatch_workflow", END)
+    def _build_graph(self): # BUILD THE AGENT GRAPH
+        graph = StateGraph(AgentGraphState) # STATE GRAPH FOR THE AGENT WORKFLOW
+        graph.add_node("route_agent", self._route_agent_node) # ROUTE AGENT NODE
+        graph.add_node("dispatch_workflow", self._dispatch_workflow_node) # DISPATCH WORKFLOW NODE (EXECUTES THE WORKFLOW)
+        graph.add_edge(START, "route_agent") # START NODE TO ROUTE AGENT NODE
+        graph.add_edge("route_agent", "dispatch_workflow") # ROUTE AGENT NODE TO DISPATCH WORKFLOW NODE
+        graph.add_edge("dispatch_workflow", END) # DISPATCH WORKFLOW NODE TO END NODE
         return graph.compile()
 
     async def _route_agent_node(self, state: AgentGraphState) -> AgentGraphState:
-        with self.tracer.start_as_current_span("agent.route") as span:
-            route = await self._route_hybrid(state["request"])
+        with self.tracer.start_as_current_span("agent.route") as span: # START SPAN FOR ROUTING THE AGENT
+            route = await self._route_hybrid(state["request"]) # ROUTE THE AGENT CALL NODE
             span.set_attribute("openinference.span.kind", "CHAIN")
             span.set_attribute("waro.agent.domain", route.workflow)
             span.set_attribute("waro.agent.route.confidence", route.confidence)
@@ -167,7 +169,7 @@ class AgentWorkflow:
                 "waro.agent.deterministic_reason",
                 fallback_route.reason,
             )
-            try:
+            try: # CALL LLM AND GET ROUTE
                 response = await self.llm_adapter.complete(
                     messages=agent_router_messages(
                         question=request.question,
@@ -273,12 +275,13 @@ class AgentWorkflow:
         context: InternalRequestContext,
         route: AgentRoute,
     ) -> AgentWorkflowResponse:
-        response = await self.sales_workflow.run(
+        response = await self.sales_workflow.run( # RUN THE SALES WORKFLOW BAED FULL AGENT CALL
             request=SalesQuestionRequest(
                 question=request.question,
                 conversation_id=request.conversation_id,
                 date_from=request.date_from,
                 date_to=request.date_to,
+                timezone=request.timezone,
                 group_by=request.group_by,
             ),
             context=context,
@@ -299,6 +302,7 @@ class AgentWorkflow:
             summary=response.summary,
             evals=response.evals,
         )
+        # RUN THE APPROPRIATE WORKFLOW BASED ON THE ROUTE, DEPRECATED FROM DETERMINISTIC ROUTING
         if route.workflow == "food_cost":
             response = await self.food_cost_workflow.run(
                 request=FoodCostQuestionRequest(
@@ -306,6 +310,7 @@ class AgentWorkflow:
                     conversation_id=request.conversation_id,
                     date_from=request.date_from,
                     date_to=request.date_to,
+                    timezone=request.timezone,
                     compare_to=request.compare_to,
                 ),
                 context=context,
@@ -317,6 +322,7 @@ class AgentWorkflow:
                     conversation_id=request.conversation_id,
                     date_from=request.date_from,
                     date_to=request.date_to,
+                    timezone=request.timezone,
                     group_by=request.group_by,
                 ),
                 context=context,
@@ -351,6 +357,7 @@ class AgentWorkflow:
                         conversation_id=request.conversation_id,
                         date_from=request.date_from,
                         date_to=request.date_to,
+                        timezone=request.timezone,
                         compare_to=request.compare_to,
                     ),
                     context=context,
@@ -362,6 +369,7 @@ class AgentWorkflow:
                         conversation_id=request.conversation_id,
                         date_from=request.date_from,
                         date_to=request.date_to,
+                        timezone=request.timezone,
                         group_by=request.group_by,
                     ),
                     context=context,

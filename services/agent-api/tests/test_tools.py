@@ -255,6 +255,7 @@ def test_sales_tool_planner_does_not_group_single_day_language_by_date():
     assert plan.steps[0].arguments == {
         "date-from": "2026-06-18",
         "date-to": "2026-06-18",
+        "timezone": "America/Bogota",
     }
 
 
@@ -312,6 +313,7 @@ def test_sales_tool_planner_ranks_customers_when_scope_allows():
     assert plan.steps[2].arguments == {
         "date-from": "2026-06-01",
         "date-to": "2026-06-20",
+        "timezone": "America/Bogota",
         "sort-field": "total_spent",
         "sort-direction": "desc",
         "limit": 20,
@@ -372,6 +374,7 @@ def test_sales_tool_planner_uses_semantic_customer_ranking_contract_with_typos()
     assert plan.steps[2].arguments == {
         "date-from": "2026-06-01",
         "date-to": "2026-06-20",
+        "timezone": "America/Bogota",
         "sort-field": "order_count",
         "sort-direction": "desc",
         "limit": 20,
@@ -485,6 +488,7 @@ async def test_internal_request_verifies_hmac_signature(monkeypatch):
             profile_id,
             "",
             scopes,
+            "America/Bogota",
             digest,
         ]
     )
@@ -519,12 +523,14 @@ async def test_internal_request_verifies_hmac_signature(monkeypatch):
         x_waro_tenant_id=tenant_id,
         x_waro_profile_id=profile_id,
         x_waro_scopes=scopes,
+        x_waro_timezone="America/Bogota",
         x_waro_request_id=request_id,
         x_waro_internal_signature=signature,
     )
 
     assert context.tenant_id == tenant_id
     assert context.scopes == ("menu:read", "orders:read")
+    assert context.timezone == "America/Bogota"
 
 
 @pytest.mark.asyncio

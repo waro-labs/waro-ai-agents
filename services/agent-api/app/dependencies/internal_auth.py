@@ -1,10 +1,25 @@
 from dataclasses import dataclass
 import hashlib
 import hmac
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Header, HTTPException, Request, status
 
 from app.config import get_settings
+
+
+DEFAULT_TENANT_TIMEZONE = "America/Bogota"
+
+
+def normalize_timezone(value: str | None) -> str:
+    if not value or not isinstance(value, str) or not value.strip():
+        return DEFAULT_TENANT_TIMEZONE
+    timezone_name = value.strip()
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return DEFAULT_TENANT_TIMEZONE
+    return timezone_name
 
 
 @dataclass(frozen=True)
@@ -14,6 +29,7 @@ class InternalRequestContext:
     request_id: str
     member_id: str | None
     scopes: tuple[str, ...]
+    timezone: str = DEFAULT_TENANT_TIMEZONE
 
 
 async def require_internal_request(
@@ -22,6 +38,7 @@ async def require_internal_request(
     x_waro_profile_id: str | None = Header(default=None),
     x_waro_member_id: str | None = Header(default=None),
     x_waro_scopes: str | None = Header(default=""),
+    x_waro_timezone: str | None = Header(default=None),
     x_waro_request_id: str | None = Header(default=None),
     x_waro_internal_signature: str | None = Header(default=None),
 ) -> InternalRequestContext:
@@ -62,6 +79,7 @@ async def require_internal_request(
     body = await request.body()
     body_digest = hashlib.sha256(body).hexdigest()
     member_id = x_waro_member_id if isinstance(x_waro_member_id, str) else None
+    timezone_name = normalize_timezone(x_waro_timezone)
     canonical = "\n".join(
         [
             request.method.upper(),
@@ -71,6 +89,7 @@ async def require_internal_request(
             x_waro_profile_id or "",
             member_id or "",
             x_waro_scopes or "",
+            timezone_name,
             body_digest,
         ]
     )
@@ -97,4 +116,5 @@ async def require_internal_request(
         request_id=x_waro_request_id or "",
         member_id=member_id,
         scopes=scopes,
+        timezone=timezone_name,
     )

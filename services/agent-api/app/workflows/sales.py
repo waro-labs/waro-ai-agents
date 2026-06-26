@@ -14,7 +14,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from app.config import Settings
 from app.database import get_db_connection
-from app.dependencies.internal_auth import InternalRequestContext
+from app.dependencies.internal_auth import InternalRequestContext, normalize_timezone
 from app.agent.runner import KaliAgentRunner
 from app.evals.sales import evaluate_sales_artifact
 from app.llm import LLMAdapter, get_llm_adapter
@@ -249,16 +249,30 @@ class SalesWorkflow:
             return {"kind": "list", "row_count": len(result)}
         return {"kind": type(result).__name__}
 
+    def _request_with_context_timezone(
+        self,
+        request: SalesQuestionRequest,
+        context: InternalRequestContext,
+    ) -> SalesQuestionRequest:
+        timezone_name = normalize_timezone(context.timezone or getattr(request, "timezone", None))
+        if getattr(request, "timezone", None) == timezone_name:
+            return request
+        if not hasattr(request, "model_copy"):
+            setattr(request, "timezone", timezone_name)
+            return request
+        return request.model_copy(update={"timezone": timezone_name})
+
     async def run(
         self,
         *,
         request: SalesQuestionRequest,
         context: InternalRequestContext,
     ) -> SalesWorkflowResponse:
+        request = self._request_with_context_timezone(request, context)
         conversation_id, input_message_id, run_id = await self._start_run(
             request=request,
             context=context,
-        )
+        ) #CONTEXT CONTAINS THE TENANT ID, MEMBER ID, SCOPES, AND REQUEST ID
         self._printf_step(
             "run_started",
             {
@@ -319,6 +333,7 @@ class SalesWorkflow:
         request: SalesQuestionRequest,
         context: InternalRequestContext,
     ) -> AsyncIterator[StreamEvent]:
+        request = self._request_with_context_timezone(request, context)
         with self.tracer.start_as_current_span("sales.stream") as span:
             span.set_attribute("openinference.span.kind", "CHAIN")
             span.set_attribute("waro.workflow.name", self.graph_name)
@@ -1273,7 +1288,8 @@ class SalesWorkflow:
         context: InternalRequestContext,
         run_id: UUID,
     ) -> dict[str, Any]:
-        fallback = self._fallback_semantic_sales_plan(request)
+        timezone_name = normalize_timezone(request.timezone or context.timezone)
+        fallback = self._fallback_semantic_sales_plan(request, timezone=timezone_name)
         if self.settings.llm_provider == "disabled":
             with self.tracer.start_as_current_span("sales.semantic_planner") as span:
                 span.set_attribute("openinference.span.kind", "CHAIN")
@@ -1316,7 +1332,7 @@ class SalesWorkflow:
             )
             return fallback
 
-        today = datetime.now(ZoneInfo("America/Bogota")).date()
+        today = datetime.now(ZoneInfo(timezone_name)).date()
         planner_model = self.settings.llm_planner_model
         with self.tracer.start_as_current_span("llm.sales.planner") as span:
             span.set_attribute("openinference.span.kind", "LLM")
@@ -1333,7 +1349,7 @@ class SalesWorkflow:
                     messages=sales_planner_messages(
                         question=request.question,
                         today=today.isoformat(),
-                        timezone="America/Bogota",
+                        timezone=timezone_name,
                         tool_catalog=tool_catalog(),
                     ),
                     temperature=0,
@@ -1577,7 +1593,7 @@ class SalesWorkflow:
         period = (
             semantic_plan.get("period")
             if isinstance(semantic_plan.get("period"), dict)
-            else self._resolve_period(request)
+            else self._resolve_period(request, timezone=request.timezone)
         )
         answer_style = (
             str(semantic_plan.get("answer_style"))
@@ -1722,8 +1738,13 @@ class SalesWorkflow:
             return "follow_up"
         return "sales_metrics"
 
-    def _fallback_semantic_sales_plan(self, request: SalesQuestionRequest) -> dict[str, Any]:
-        period = self._resolve_period(request)
+    def _fallback_semantic_sales_plan(
+        self,
+        request: SalesQuestionRequest,
+        *,
+        timezone: str | None = None,
+    ) -> dict[str, Any]:
+        period = self._resolve_period(request, timezone=timezone)
         normalized = self._normalize_question(request.question)
         group_by = request.group_by
         if group_by is None and self._needs_daily_breakdown(normalized):
@@ -1763,6 +1784,7 @@ class SalesWorkflow:
                 has_conversation_context=request.conversation_id is not None,
             ),
             "period": period,
+            "timezone": normalize_timezone(timezone or request.timezone),
             "group_by": group_by,
             "answer_style": answer_style,
             "request_kind": request_kind,
@@ -1949,6 +1971,7 @@ class SalesWorkflow:
         return {
             "intent": intent,
             "period": period,
+            "timezone": normalize_timezone(request.timezone),
             "group_by": group_by,
             "answer_style": answer_style,
             "request_kind": request_kind,
@@ -2140,7 +2163,7 @@ class SalesWorkflow:
         if request.conversation_id is None or not previous_context_summary:
             return {"used_context": False}
         normalized = self._normalize_question(request.question)
-        today = datetime.now(ZoneInfo("America/Bogota")).date()
+        today = datetime.now(ZoneInfo(normalize_timezone(request.timezone))).date()
         if self._request_has_explicit_period(request, normalized=normalized, today=today):
             return {"used_context": False, "reason": "request_has_period"}
         if not self._is_contextual_drilldown(normalized):
@@ -2347,10 +2370,15 @@ class SalesWorkflow:
     def _has_sales_signal(self, normalized: str) -> bool:
         return any(re.search(pattern, normalized) for pattern in SALES_SIGNAL_PATTERNS)
 
-    def _resolve_period(self, request: SalesQuestionRequest) -> dict[str, str]:
+    def _resolve_period(
+        self,
+        request: SalesQuestionRequest,
+        *,
+        timezone: str | None = None,
+    ) -> dict[str, str]:
         if request.date_from and request.date_to:
             return {"date_from": request.date_from, "date_to": request.date_to}
-        today = datetime.now(ZoneInfo("America/Bogota")).date()
+        today = datetime.now(ZoneInfo(normalize_timezone(timezone or request.timezone))).date()
         inferred = self._infer_period_from_question(request.question, today=today)
         if inferred:
             return {

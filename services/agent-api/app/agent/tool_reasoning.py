@@ -11,7 +11,7 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
 from app.config import Settings
-from app.dependencies.internal_auth import InternalRequestContext
+from app.dependencies.internal_auth import InternalRequestContext, normalize_timezone
 from app.llm.base import LLMAdapter, LLMMessage, LLMResponse
 from app.llm.model_router import Complexity, model_for
 from app.telemetry import mark_span_error
@@ -41,11 +41,12 @@ async def run_tool_reasoning_agent(
     complexity: Complexity,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
-    tools = await _available_tools(registry=registry, scopes=context.scopes)
+    # Start from the tools allowed for this tenant/scopes; the LLM never sees forbidden tools.
+    tools = await _available_tools(registry=registry, scopes=context.scopes) # SCHEMA OF AVAILABLE TOOLS FROM WARO CLI
     transcript: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
     initial_prompt_tools = _prompt_tools(question=question, tools=tools, observations=observations)
-    await _emit_progress(
+    await _emit_progress( # SSE NOTIFICATION OF AVAILABLE TOOLS
         progress_callback,
         "agent_step",
         {
@@ -62,10 +63,12 @@ async def run_tool_reasoning_agent(
         tools=tools,
         conversation_messages=conversation_messages or [],
         observations=observations,
+        timezone=context.timezone,
     )
 
+    # ReAct-style loop: ask the model what to do, run one tool if needed, then plan again with the new evidence.
     for step_index in range(MAX_TOOL_CALLS):
-        await _emit_progress(
+        await _emit_progress( # SSE NOTIFICATION OF LLM STARTED
             progress_callback,
             "llm_started",
             {
@@ -74,7 +77,7 @@ async def run_tool_reasoning_agent(
                 "step_index": step_index + 1,
             },
         )
-        decision = await _complete_json(
+        decision = await _complete_json( # CALL LLM AND GET DECISION TO CALL TOOL OR ANSWER
             settings=settings,
             llm_adapter=llm_adapter,
             messages=messages,
@@ -100,7 +103,7 @@ async def run_tool_reasoning_agent(
             )
         else:
             arguments = _clean_arguments(arguments=arguments, tool=tools[tool_name])
-            await _emit_progress(
+            await _emit_progress( # SSE NOTIFICATION OF TOOL STARTED
                 progress_callback,
                 "tool_started",
                 {
@@ -109,7 +112,7 @@ async def run_tool_reasoning_agent(
                     "step_index": step_index + 1,
                 },
             )
-            try:
+            try: # CALL TOOL AND GET RESPONSE
                 response = await gateway.call(
                     request=ToolCallRequest(
                         run_id=run_id,
@@ -130,7 +133,7 @@ async def run_tool_reasoning_agent(
                         "error": response.error,
                     }
                 )
-                await _emit_progress(
+                await _emit_progress( # SSE NOTIFICATION OF TOOL FINISHED
                     progress_callback,
                     "tool_finished",
                     {
@@ -158,7 +161,7 @@ async def run_tool_reasoning_agent(
                         },
                     }
                 )
-                await _emit_progress(
+                await _emit_progress( # SSE NOTIFICATION OF TOOL FINISHED
                     progress_callback,
                     "tool_finished",
                     {
@@ -191,14 +194,16 @@ async def run_tool_reasoning_agent(
                     },
                 )
         transcript.append({"step": step_index + 1, "decision": decision, "observation": observations[-1]})
+        # Rebuild the prompt after every observation so the next LLM step can use the actual tool result.
         messages = _planning_messages(
             question=question,
             tools=tools,
             conversation_messages=conversation_messages or [],
             observations=observations,
+            timezone=context.timezone,
         )
 
-    await _emit_progress(
+    await _emit_progress( #SSE NOTIFICATION OF FINAL ANSWER STARTED
         progress_callback,
         "agent_step",
         {
@@ -208,6 +213,7 @@ async def run_tool_reasoning_agent(
             "observation_count": len(observations),
         },
     )
+    # Final composition is separate from planning: it should explain evidence, not call more tools.
     summary = await _final_answer(
         settings=settings,
         llm_adapter=llm_adapter,
@@ -217,6 +223,7 @@ async def run_tool_reasoning_agent(
         complexity=complexity,
         run_id=run_id,
         tenant_id=context.tenant_id,
+        timezone=context.timezone,
     )
     safe_to_answer = bool(summary.strip())
     return sanitize_value(
@@ -236,11 +243,13 @@ async def run_tool_reasoning_agent(
     )
 
 
+# GET AVAILABLE TOOLS FROM WARO CLI AND RETURN SCHEMA OF AVAILABLE TOOLS, SNAPSHOT OF TOOLS AND ARGUMENTS SCHEMA
 async def _available_tools(*, registry: ToolRegistry, scopes: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     snapshot = await registry.refresh()
     scope_set = set(scopes)
     result = {}
     for name, spec in snapshot.tools.items():
+        # Tool visibility is enforced here before the prompt is built.
         if not _tool_scope_allowed(tool_name=name, scope=spec.scope, scopes=scope_set):
             continue
         schema = snapshot.schemas.get(name)
@@ -270,6 +279,7 @@ async def _available_tools(*, registry: ToolRegistry, scopes: tuple[str, ...]) -
 
 def _clean_arguments(*, arguments: dict[str, Any], tool: dict[str, Any]) -> dict[str, Any]:
     if tool.get("name") == "waro.queries.run":
+        # The CLI expects QuerySpec as one JSON string argument, even when the LLM produced an object.
         if isinstance(arguments.get("spec"), str):
             return {"spec": arguments["spec"]}
         if isinstance(arguments.get("spec"), dict):
@@ -354,11 +364,12 @@ def _planning_messages(
     tools: dict[str, dict[str, Any]],
     conversation_messages: list[dict[str, str]],
     observations: list[dict[str, Any]],
+    timezone: str,
 ) -> list[LLMMessage]:
     prompt_tools = _prompt_tools(question=question, tools=tools, observations=observations)
     payload = {
         "question": question,
-        "current_date": _current_date_payload(),
+        "current_date": _current_date_payload(timezone),
         "conversation_messages": conversation_messages[-8:],
         "available_tools": prompt_tools,
         "observations": observations,
@@ -399,7 +410,7 @@ async def _complete_json(
     observation_count: int,
 ) -> dict[str, Any]:
     model = model_for(settings, step="agent_step", complexity=complexity)
-    with TRACER.start_as_current_span("llm.tool_reasoning.plan") as span:
+    with TRACER.start_as_current_span("llm.tool_reasoning.plan") as span: # START SPAN FOR LLM CALL
         _set_llm_request_span_attributes(
             span=span,
             llm_adapter=llm_adapter,
@@ -417,9 +428,10 @@ async def _complete_json(
         span.set_attribute("waro.tool_reasoning.available_tools_prompt_char_count", prompt_tools_chars)
         span.set_attribute("waro.tool_reasoning.observation_count", observation_count)
         try:
-            response = await llm_adapter.complete(
+            # This is the planning LLM call: it returns JSON with either call_tool or answer.
+            response = await llm_adapter.complete( # CALL LLM AND GET DECISION TO CALL TOOL OR ANSWER
                 messages=messages,
-                temperature=0,
+                temperature=0, 
                 model=model,
             )
         except Exception as exc:
@@ -453,10 +465,11 @@ async def _final_answer(
     complexity: Complexity,
     run_id: UUID,
     tenant_id: str,
+    timezone: str,
 ) -> str:
     payload = {
         "question": question,
-        "current_date": _current_date_payload(),
+        "current_date": _current_date_payload(timezone),
         "conversation_messages": conversation_messages[-8:],
         "observations": observations,
     }
@@ -496,6 +509,7 @@ async def _final_answer(
             sum(1 for observation in observations if observation.get("status") == "succeeded"),
         )
         try:
+            # This LLM call writes the user-facing answer using only observations gathered above.
             response = await llm_adapter.complete(
                 messages=messages,
                 temperature=0.2,
@@ -557,12 +571,13 @@ def _set_llm_response_span_attributes(*, span: Any, response: LLMResponse) -> No
     span.set_attribute("llm.cost.source", response.cost_source)
 
 
-def _current_date_payload() -> dict[str, str]:
-    timezone = "America/Bogota"
-    now = datetime.now(ZoneInfo(timezone))
-    return {"date": now.date().isoformat(), "timezone": timezone}
+def _current_date_payload(timezone: str) -> dict[str, str]:
+    timezone_name = normalize_timezone(timezone)
+    now = datetime.now(ZoneInfo(timezone_name))
+    return {"date": now.date().isoformat(), "timezone": timezone_name}
 
 
+# Pick the most relevant allowed tools for the LLM prompt, keeping the prompt small.
 def _prompt_tools(
     *,
     question: str,

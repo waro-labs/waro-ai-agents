@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+DEFAULT_TENANT_TIMEZONE = "America/Bogota"
+
 
 class FoodCostQuestionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -11,6 +13,7 @@ class FoodCostQuestionRequest(BaseModel):
     conversation_id: UUID | None = None
     date_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     date_to: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    timezone: str = Field(default=DEFAULT_TENANT_TIMEZONE, max_length=64)
     compare_to: str | None = Field(default=None, max_length=80)
 
 
@@ -39,6 +42,7 @@ class SalesQuestionRequest(BaseModel):
     conversation_id: UUID | None = None
     date_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     date_to: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    timezone: str = Field(default=DEFAULT_TENANT_TIMEZONE, max_length=64)
     group_by: Literal["date", "weekday", "hour", "product", "payment", "ticket"] | None = None
 
 
@@ -61,6 +65,7 @@ class AgentQuestionRequest(BaseModel):
     workflow: Literal["sales", "food_cost"] | None = None
     date_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     date_to: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    timezone: str = Field(default=DEFAULT_TENANT_TIMEZONE, max_length=64)
     compare_to: str | None = Field(default=None, max_length=80)
     group_by: Literal["date", "weekday", "hour", "product", "payment", "ticket"] | None = None
 

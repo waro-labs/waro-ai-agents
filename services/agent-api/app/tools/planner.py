@@ -73,6 +73,7 @@ class ToolPlanner:
         dimensions = self._semantic_string_list(semantic_plan, "dimensions")
         requested_metrics = self._semantic_string_list(semantic_plan, "requested_metrics")
         sort_field = self._semantic_text(semantic_plan, "sort_field")
+        timezone = self._semantic_text(semantic_plan, "timezone") or "America/Bogota"
         requested_limit = self._semantic_limit(semantic_plan, default=20)
         metrics_group_by = group_by or self._infer_sales_group_by(normalized)
         if not metrics_group_by and request_kind == "daily_analysis":
@@ -96,6 +97,7 @@ class ToolPlanner:
         metrics_arguments: dict[str, Any] = {
             "date-from": period["date_from"],
             "date-to": period["date_to"],
+            "timezone": timezone,
         }
         if sales_metrics_group_by:
             metrics_arguments["group-by"] = sales_metrics_group_by
@@ -133,6 +135,7 @@ class ToolPlanner:
                     arguments={
                         "date-from": period["date_from"],
                         "date-to": period["date_to"],
+                        "timezone": timezone,
                     },
                     fields=["data", "meta", "success"],
                     reason="Food-cost context can explain margin and profitability questions.",
@@ -147,6 +150,7 @@ class ToolPlanner:
                     arguments={
                         "date-from": period["date_from"],
                         "date-to": period["date_to"],
+                        "timezone": timezone,
                         "limit": requested_limit,
                     },
                     fields=["data", "meta", "success"],
@@ -173,6 +177,7 @@ class ToolPlanner:
                     arguments={
                         "date-from": period["date_from"],
                         "date-to": period["date_to"],
+                        "timezone": timezone,
                     },
                     fields=["summary", "top_customers"],
                     reason="Customer metrics can explain demand, retention, and frequency.",
@@ -186,6 +191,7 @@ class ToolPlanner:
                         arguments={
                             "date-from": period["date_from"],
                             "date-to": period["date_to"],
+                            "timezone": timezone,
                             "sort-field": self._customer_sort_field(
                                 normalized,
                                 semantic_sort=sort_field,
@@ -217,6 +223,7 @@ class ToolPlanner:
                 "group_by": metrics_group_by,
                 "sales_metrics_group_by": sales_metrics_group_by,
                 "answer_style": answer_style,
+                "timezone": timezone,
                 "limit": requested_limit,
             },
             available_tools=available_tools,

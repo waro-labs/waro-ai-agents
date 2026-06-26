@@ -145,6 +145,8 @@ def _arguments_for(intent: QuestionIntent, capability: Any) -> dict[str, Any]:
         args["date-from"] = intent.time_range.date_from
     if intent.time_range.date_to and capability.supports_period and "date-to" in properties:
         args["date-to"] = intent.time_range.date_to
+    if "timezone" in properties:
+        args["timezone"] = intent.time_range.timezone
     if "period" in properties and capability.supports_period:
         args["period"] = _period_days(intent)
     if "limit" in properties:

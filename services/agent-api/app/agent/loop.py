@@ -90,6 +90,7 @@ class AgentLoop:
                 conversation_messages=conversation_messages,
                 conversation_state=context_state,
                 capability_hints=[capability.to_dict() for capability in capabilities],
+                timezone=context.timezone,
             )
             span.set_attribute("waro.intent.entity", intent.entity)
             span.set_attribute("waro.intent.measures", ",".join(intent.measures))

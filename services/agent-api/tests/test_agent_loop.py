@@ -1,5 +1,6 @@
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -57,6 +58,16 @@ class IntentLLM:
 
     async def complete(self, *, messages, temperature=0.2, model=None):
         return LLMResponse(content=json.dumps(self.payload), model=model or "test", provider="kimi")
+
+
+class FixedDateTime(datetime):
+    fixed_now = datetime(2026, 6, 1, 4, 30, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return cls.fixed_now.replace(tzinfo=None)
+        return cls.fixed_now.astimezone(tz)
 
 
 class ToolReasoningLLM:
@@ -353,6 +364,38 @@ async def test_question_intent_sales_ticket():
     assert "total_sales" in intent.measures
     assert "avg_ticket" in intent.measures
     assert "aggregate" in intent.operations
+
+
+def test_heuristic_intent_uses_tenant_timezone_for_today(monkeypatch):
+    monkeypatch.setattr("app.agent.intent.datetime", FixedDateTime)
+
+    bogota = heuristic_intent("cuanto vendi hoy", timezone="America/Bogota")
+    new_york = heuristic_intent("cuanto vendi hoy", timezone="America/New_York")
+
+    assert bogota.time_range.date_from == "2026-05-31"
+    assert bogota.time_range.date_to == "2026-05-31"
+    assert bogota.time_range.timezone == "America/Bogota"
+    assert new_york.time_range.date_from == "2026-06-01"
+    assert new_york.time_range.date_to == "2026-06-01"
+    assert new_york.time_range.timezone == "America/New_York"
+
+
+def test_sales_period_resolution_uses_tenant_timezone_for_current_month(monkeypatch):
+    from app.workflows.models import SalesQuestionRequest
+    from app.workflows.sales import SalesWorkflow
+
+    monkeypatch.setattr("app.workflows.sales.datetime", FixedDateTime)
+    workflow = SalesWorkflow(settings=Settings(LLM_PROVIDER="disabled"))
+
+    bogota = workflow._resolve_period(
+        SalesQuestionRequest(question="ventas este mes", timezone="America/Bogota")
+    )
+    new_york = workflow._resolve_period(
+        SalesQuestionRequest(question="ventas este mes", timezone="America/New_York")
+    )
+
+    assert bogota == {"date_from": "2026-05-01", "date_to": "2026-05-31"}
+    assert new_york == {"date_from": "2026-06-01", "date_to": "2026-06-01"}
 
 
 @pytest.mark.asyncio
@@ -2104,6 +2147,7 @@ def test_tool_reasoning_planner_uses_compact_tool_prompt():
         tools=tools,
         conversation_messages=[],
         observations=[],
+        timezone="America/Bogota",
     )
     payload = json.loads(messages[1].content)
 
@@ -2196,6 +2240,7 @@ def test_tool_reasoning_customer_prompt_prefers_customer_tools_without_legacy_da
         tools=tools,
         conversation_messages=[],
         observations=[],
+        timezone="America/Bogota",
     )
     payload = json.loads(messages[1].content)
 
@@ -2262,6 +2307,7 @@ def test_tool_reasoning_procurement_prompt_prefers_query_tools_for_buy_question(
         tools=tools,
         conversation_messages=[],
         observations=[],
+        timezone="America/Bogota",
     )
     payload = json.loads(messages[1].content)
 
