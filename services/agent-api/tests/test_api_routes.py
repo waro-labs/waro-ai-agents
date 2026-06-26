@@ -114,6 +114,7 @@ def route_client():
             request_id="req-route-test",
             member_id=None,
             scopes=("orders:read", "analytics:read", "menu:read", "financial:read"),
+            timezone="America/Mexico_City",
         )
 
     app.dependency_overrides[require_internal_request] = internal_context
@@ -160,6 +161,7 @@ def test_sales_sync_endpoint_remains_available_for_compatibility(route_client):
     assert data["summary"] == "Ayer vendiste 431500."
     assert data["artifact"]["metrics"]["total_sales"] == 431500.0
     assert sales_workflow.run_requests[0][0].question == "Cuanto vendi ayer?"
+    assert sales_workflow.run_requests[0][1].timezone == "America/Mexico_City"
 
 
 def test_food_cost_sync_endpoint_remains_available_for_compatibility(route_client):
@@ -198,6 +200,7 @@ def test_sales_stream_endpoint_returns_sse_frames(route_client):
     assert frames[-1][1]["summary"] == "Ayer vendiste 431500."
     assert "question" not in frames[-1][1]["artifact_summary"]
     assert sales_workflow.stream_requests[0][0].question == "Cuanto vendi ayer?"
+    assert sales_workflow.stream_requests[0][1].timezone == "America/Mexico_City"
 
 
 def test_food_cost_stream_endpoint_returns_sse_frames(route_client):

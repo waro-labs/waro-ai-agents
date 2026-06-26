@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from app.config import Settings
 from app.llm.base import LLMAdapter, LLMMessage
 from app.llm.model_router import model_for
+from app.dependencies.internal_auth import normalize_timezone
 
 Entity = str
 Grain = str
@@ -114,10 +115,12 @@ async def parse_question_intent(
     conversation_messages: list[dict[str, str]] | None = None,
     conversation_state: dict[str, Any] | None = None,
     capability_hints: list[dict[str, Any]] | None = None,
+    timezone: str = "America/Bogota",
 ) -> QuestionIntent:
     vocabulary = vocabulary_from_capabilities(capability_hints or [])
+    # The heuristic intent is the safety net: it lets the agent work even if the LLM is disabled or fails.
     fallback = resolve_contextual_intent(
-        heuristic_intent(question, capability_hints=capability_hints),
+        heuristic_intent(question, capability_hints=capability_hints, timezone=timezone),
         question=question,
         conversation_state=conversation_state,
         source="heuristic_context",
@@ -152,6 +155,7 @@ async def parse_question_intent(
         LLMMessage(role="user", content=json.dumps(payload, ensure_ascii=False, default=str)),
     ]
     try:
+        # Classifier LLM: extracts analytic intent only. Tool choice happens later in tool_reasoning.py.
         response = await llm_adapter.complete(
             messages=messages,
             temperature=0,
@@ -179,11 +183,19 @@ async def parse_question_intent(
 def heuristic_intent(
     question: str,
     capability_hints: list[dict[str, Any]] | None = None,
+    timezone: str = "America/Bogota",
 ) -> QuestionIntent:
     _ = capability_hints
     normalized = normalize_text(question)
-    today = datetime.now(ZoneInfo("America/Bogota")).date()
+    timezone_name = normalize_timezone(timezone)
+    today = datetime.now(ZoneInfo(timezone_name)).date()
     time_range = infer_time_range(normalized, today=today)
+    time_range = TimeRange(
+        date_from=time_range.date_from,
+        date_to=time_range.date_to,
+        timezone=timezone_name,
+        label=time_range.label,
+    )
     entity: Entity = "sale"
     grain: Grain = "period"
     measures: list[str] = []
