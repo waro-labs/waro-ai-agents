@@ -31,7 +31,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-change_me}"]
     restart: unless-stopped
     volumes:
       - redis-data:/data
@@ -44,6 +44,7 @@ services:
       retries: 3
     networks:
       - waro_ai_internal
+      - waro_runtime
 
   phoenix:
     image: arizephoenix/phoenix:latest
